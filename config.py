@@ -14,11 +14,19 @@ DEFAULT_UNIVERSES: Dict[str, List[str]] = {
         "RIOT", "MARA", "IONQ", "ARM", "CAVA", "HIMS", "HOOD", "RBLX", "NET", "SNOW",
         "UPST", "ASTS", "CELH", "RKLB", "TEM",
     ],
+    "Small / Mid Caps": [
+        "IONQ", "RKLB", "SOFI", "AFRM", "UPST", "RBLX", "HIMS", "PLUG", "RUN", "RIOT",
+        "MARA", "LMND", "OPEN", "CHPT", "JOBY", "DNA", "QS", "ACHR", "SOUN", "BBAI",
+    ],
+    "Penny / Low Price Stocks": [
+        "SIRI", "OPEN", "KGC", "PLUG", "MVIS", "RIG", "GRPN", "BB", "TLRY", "MULN",
+        "NKLA", "SNDL", "CIFR", "WULF", "CLSK", "MARA", "RIOT", "BNGO", "OCGN", "APLD",
+    ],
     "ETFs": ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE", "SMH", "ARKK", "SOXX"],
     "Indices": ["^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX", "^AXJO"],
     "Forex": ["EURUSD=X", "GBPUSD=X", "AUDUSD=X", "USDJPY=X", "USDCHF=X", "USDCAD=X", "NZDUSD=X"],
     "Crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "BNB-USD"],
 }
 
-DEFAULT_CUSTOM_SYMBOLS = "TSLA,NVDA,AMD,PLTR,SMCI,COIN,MSTR,RIVN,SOFI,AFRM,RIOT,MARA,IONQ,ARM,CAVA,HIMS,HOOD,RBLX,NET,SNOW,SPY,QQQ,IWM,BTC-USD,ETH-USD"
+DEFAULT_CUSTOM_SYMBOLS = "TSLA,NVDA,AMD,PLTR,SMCI,COIN,MSTR,RIVN,SOFI,AFRM,RIOT,MARA,IONQ,RKLB,SIRI,PLUG,OPEN,SPY,QQQ,IWM,BTC-USD,ETH-USD"
 
