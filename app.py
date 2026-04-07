@@ -33,6 +33,124 @@ RESULT_DEFAULTS = {
     "atm_iv": pd.NA,
 }
 
+GLOSSARY_ITEMS = [
+    ("Signal", "The scanner's directional idea. `LONG` means the setup favors buying for a move up. `SHORT` means it favors selling for a move down."),
+    ("Conviction", "A 0-100 score built from trend, momentum, volume, regime, news, options, and liquidity checks. Higher does not mean guaranteed; it only means more conditions aligned."),
+    ("Trigger-ready", "Whether price has already reached the scanner's minimum confirmation level. `READY` means the setup is active now. `WAIT` means the idea exists but confirmation has not happened yet."),
+    ("VWAP", "Volume Weighted Average Price. It shows the average traded price weighted by volume. Many intraday traders treat price above VWAP as stronger intraday behavior and below VWAP as weaker behavior."),
+    ("EMA9 / EMA20", "Fast exponential moving averages. They react quickly to recent price changes. When EMA9 is above EMA20, short-term momentum is often stronger."),
+    ("SMA50", "A slower simple moving average. It helps show the broader intraday trend context compared with the faster EMAs."),
+    ("RSI", "Relative Strength Index. A momentum oscillator from 0 to 100. Very high RSI can mean strong momentum or overextension. Very low RSI can mean weakness or oversold conditions."),
+    ("ATR %", "Average True Range as a percentage of price. It estimates how much the asset typically moves. Higher ATR usually means wider swings and potentially wider stops."),
+    ("RelVol", "Relative volume. A reading of `2.0` means recent volume is about 2x the rolling average. Bigger relative volume can make a breakout more trustworthy."),
+    ("Spread Proxy %", "A rough tradability estimate based on recent bar range, not a real broker bid/ask spread. Lower is generally easier to trade. It is a proxy, not an execution quote."),
+    ("Support / Resistance", "Areas where price recently found buyers or sellers. Support is a floor-like area; resistance is a ceiling-like area."),
+    ("Prev High / Prev Low", "Reference points from prior bars. Traders watch them because breakouts and breakdowns often happen around these levels."),
+    ("MTF State", "Multi-timeframe state. The scanner checks more than one timeframe and labels them aligned bullish, aligned bearish, or mixed."),
+    ("Entry", "The price area the plan assumes for getting in. It is not a promise that the market will fill there."),
+    ("Stop", "The exit level used if the trade is wrong. It exists to define risk before entering."),
+    ("Target 1 / Target 2", "Planned profit areas. These are scenarios, not guarantees."),
+    ("R:R", "Risk-to-reward. If a trade risks $1 to try to make $2, the R:R is 2.0."),
+    ("News Sentiment", "A simple headline-tone read from recent public headlines. It is only a lightweight context signal, not deep news analysis."),
+    ("Options Bias", "A rough read of options positioning from put/call open interest or volume. It can hint at bullish or bearish positioning, but it is not a standalone trade signal."),
+    ("Event Risk", "A warning for scheduled catalysts like earnings or dividend dates. High event risk means the asset may gap or move sharply around the event."),
+    ("Liquidity Label", "A rough quality label for how tradable the instrument looks based on recent dollar volume and spread proxy. Higher liquidity is generally easier for beginners."),
+]
+
+
+def render_beginner_guide():
+    with st.expander("Beginner Guide: terms, example, assumptions"):
+        tab1, tab2, tab3, tab4 = st.tabs(["Quick start", "Glossary", "Worked example", "Assumptions"])
+
+        with tab1:
+            st.markdown(
+                """
+                **What this app does**
+
+                This scanner does not predict the future. It ranks symbols based on a checklist of conditions that intraday traders often watch: trend, momentum, volume, structure, market regime, catalyst risk, and tradability.
+
+                **A simple way to use it**
+
+                1. Start with `Market regime`. If the market is choppy, be more selective.
+                2. Look for higher `Conviction` and decide whether you only want `READY` setups.
+                3. Open one symbol in `Setup inspection`.
+                4. Read the `Reasoning`, `Trade plan`, `News / Catalyst`, `Options Snapshot`, and `Event / Liquidity` sections together.
+                5. Before entering anything, ask: where is my entry, where is my stop, what invalidates the idea, and is the instrument liquid enough for me?
+
+                **What a beginner should focus on first**
+
+                Watch `Signal`, `Trigger-ready`, `VWAP`, `RelVol`, `Stop`, `Target 1`, and `Event risk` before worrying about every advanced field.
+                """
+            )
+
+        with tab2:
+            for term, explanation in GLOSSARY_ITEMS:
+                st.markdown(f"**{term}**")
+                st.write(explanation)
+
+        with tab3:
+            st.markdown(
+                """
+                **Worked example: AAPL intraday long**
+
+                Imagine AAPL is trading at `210.40`.
+
+                Example readings:
+                - `Signal = LONG`
+                - `Conviction = 74`
+                - `Trigger-ready = READY`
+                - `VWAP = 209.95`
+                - `EMA9 > EMA20 > SMA50`
+                - `RelVol = 1.9`
+                - `RSI = 63`
+                - `Entry = 210.40`
+                - `Stop = 209.70`
+                - `Target 1 = 211.80`
+                - `Target 2 = 212.50`
+                - `Event risk = LOW`
+                - `Liquidity label = HIGH`
+
+                **How a beginner should read that**
+
+                Price is above VWAP, short-term moving averages are stacked bullish, and volume is stronger than usual. That means buyers are in control for now. The setup is `READY`, so the scanner believes price has already met its basic confirmation.
+
+                The trade plan says you would be wrong if price falls to around `209.70`, so that becomes the invalidation point. If you do not know where you are wrong, you should not take the trade. If price reaches `211.80`, that is the first planned profit zone.
+
+                **What this does not mean**
+
+                It does not mean AAPL must go up. It only means several conditions are aligned at the same time. A beginner should still check the chart, verify the live spread, keep size small, and use the stop level as a hard risk boundary.
+                """
+            )
+
+        with tab4:
+            st.markdown(
+                """
+                **Scanner assumptions**
+
+                - The scanner assumes recent price behavior can provide useful intraday context.
+                - It assumes higher volume and aligned timeframes make setups more meaningful.
+                - It assumes the planned `Entry`, `Stop`, and `Targets` are guides, not guaranteed fills.
+                - It assumes public news, options, and calendar data are helpful context, but not perfect.
+                - It assumes the `Spread Proxy %` is only an estimate unless a real broker spread feed is connected.
+
+                **Important beginner cautions**
+
+                - `Conviction` is not certainty.
+                - `READY` does not mean safe.
+                - `LONG` and `SHORT` are ideas, not instructions.
+                - High `Event risk` can cause fast moves and slippage.
+                - Low-liquidity instruments can move erratically and fill badly.
+                - A good setup with bad risk sizing can still be a bad trade.
+
+                **Good first-demo-account habits**
+
+                - Trade only very liquid names at first.
+                - Avoid trading right before earnings or major events.
+                - Risk a tiny amount and practice following stops.
+                - Review whether the setup failed because the idea was wrong or because the execution was poor.
+                """
+            )
+
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "last_scan" not in st.session_state:
@@ -83,6 +201,8 @@ with st.expander("How to use this tool"):
         5. Backtest before trusting any idea too much.
         """
     )
+
+render_beginner_guide()
 
 regime = detect_market_regime()
 
