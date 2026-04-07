@@ -151,6 +151,112 @@ def render_beginner_guide():
                 """
             )
 
+
+def _format_duration(delta: pd.Timedelta | None) -> str:
+    if delta is None or pd.isna(delta):
+        return "N/A"
+    total_seconds = int(max(delta.total_seconds(), 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _ensure_signal_state(history: dict, symbol: str) -> dict:
+    if symbol not in history:
+        history[symbol] = {
+            "LONG": {"active_since": None, "last_started": None, "last_ended": None, "last_duration_seconds": None},
+            "SHORT": {"active_since": None, "last_started": None, "last_ended": None, "last_duration_seconds": None},
+            "last_seen": None,
+        }
+    return history[symbol]
+
+
+def _close_signal_window(signal_state: dict, ended_at: pd.Timestamp):
+    active_since = signal_state.get("active_since")
+    if active_since is None:
+        return
+    started_at = pd.Timestamp(active_since)
+    duration = ended_at - started_at
+    signal_state["last_started"] = started_at.isoformat()
+    signal_state["last_ended"] = ended_at.isoformat()
+    signal_state["last_duration_seconds"] = max(duration.total_seconds(), 0)
+    signal_state["active_since"] = None
+
+
+def update_signal_history(scan_df: pd.DataFrame, scanned_at: pd.Timestamp):
+    history = st.session_state.signal_history
+    if scan_df.empty:
+        return
+
+    for _, row in scan_df.iterrows():
+        symbol = row["symbol"]
+        signal = row["signal"]
+        ready = bool(row["trigger_ready"])
+        symbol_state = _ensure_signal_state(history, symbol)
+        symbol_state["last_seen"] = scanned_at.isoformat()
+
+        active_signal_state = symbol_state[signal]
+        opposite_signal = "SHORT" if signal == "LONG" else "LONG"
+        opposite_signal_state = symbol_state[opposite_signal]
+
+        if ready:
+            if active_signal_state["active_since"] is None:
+                active_signal_state["active_since"] = scanned_at.isoformat()
+            _close_signal_window(opposite_signal_state, scanned_at)
+        else:
+            _close_signal_window(symbol_state["LONG"], scanned_at)
+            _close_signal_window(symbol_state["SHORT"], scanned_at)
+
+
+def render_signal_timing_section(symbol: str):
+    history = st.session_state.signal_history.get(symbol)
+    st.subheader("Signal timing")
+    st.caption("Tracks when this symbol most recently became `READY` to buy or sell during this app session.")
+
+    if not history:
+        st.info("No readiness history yet for this symbol. Run a few scans to build timing confidence.")
+        return
+
+    now_ts = pd.Timestamp.now()
+    cols = st.columns(2)
+    for idx, side in enumerate(["LONG", "SHORT"]):
+        signal_state = history[side]
+        active_since = signal_state.get("active_since")
+        last_started = signal_state.get("last_started")
+        last_ended = signal_state.get("last_ended")
+        last_duration_seconds = signal_state.get("last_duration_seconds")
+
+        if active_since:
+            active_since_ts = pd.Timestamp(active_since)
+            status_text = f"READY now for {_format_duration(now_ts - active_since_ts)}"
+            last_window = f"Started: {active_since_ts.strftime('%Y-%m-%d %H:%M:%S')}"
+        elif last_started and last_ended:
+            status_text = "Not ready now"
+            last_window = (
+                f"Last ready window: {pd.Timestamp(last_started).strftime('%Y-%m-%d %H:%M:%S')} "
+                f"to {pd.Timestamp(last_ended).strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            status_text = "No ready signal seen yet"
+            last_window = "Last ready window: N/A"
+
+        duration_text = (
+            _format_duration(pd.Timedelta(seconds=float(last_duration_seconds)))
+            if last_duration_seconds is not None
+            else "N/A"
+        )
+
+        with cols[idx]:
+            with st.container(border=True):
+                st.markdown(f"**{side} readiness**")
+                st.write(status_text)
+                st.caption(last_window)
+                st.caption(f"Last completed duration: {duration_text}")
+
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "last_scan" not in st.session_state:
@@ -159,6 +265,8 @@ if "scanned_at" not in st.session_state:
     st.session_state.scanned_at = "Not run"
 if "staged_order" not in st.session_state:
     st.session_state.staged_order = None
+if "signal_history" not in st.session_state:
+    st.session_state.signal_history = {}
 
 st.sidebar.title("Scanner Setup")
 universe_name = st.sidebar.selectbox("Choose universe", list(DEFAULT_UNIVERSES.keys()) + ["Custom"])
@@ -208,7 +316,7 @@ regime = detect_market_regime()
 
 if run_scan or auto_refresh:
     shortlist = symbols[:max_symbols]
-    results = scan_symbols(
+    raw_results = scan_symbols(
         symbols=shortlist,
         period=period,
         interval=interval,
@@ -216,6 +324,10 @@ if run_scan or auto_refresh:
         pause_s=scan_pause,
         regime=regime,
     )
+    results = raw_results.copy()
+    scan_timestamp = pd.Timestamp.now()
+    if not raw_results.empty:
+        update_signal_history(raw_results, scan_timestamp)
     if not results.empty:
         results = results[
             (results["conviction"] >= min_conviction)
@@ -226,7 +338,7 @@ if run_scan or auto_refresh:
         if only_trigger_ready:
             results = results[results["trigger_ready"]].reset_index(drop=True)
     st.session_state.last_scan = results
-    st.session_state.scanned_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
 results = st.session_state.last_scan
 if not results.empty:
@@ -406,6 +518,7 @@ render_setup_detail(
     },
 )
 render_market_intel(selected)
+render_signal_timing_section(selected_symbol)
 
 st.markdown("---")
 st.subheader("Execution ticket")
