@@ -65,6 +65,7 @@ GLOSSARY_ITEMS = [
     ("Options Bias", "A rough read of options positioning from put/call open interest or volume. It can hint at bullish or bearish positioning, but it is not a standalone trade signal."),
     ("Event Risk", "A warning for scheduled catalysts like earnings or dividend dates. High event risk means the asset may gap or move sharply around the event."),
     ("Liquidity Label", "A rough quality label for how tradable the instrument looks based on recent dollar volume and spread proxy. Higher liquidity is generally easier for beginners."),
+    ("Options Opportunity Board", "A ranked view of underlyings whose option-chain context looks interesting. This is not the same as scanning individual option contracts."),
 ]
 
 
@@ -90,6 +91,10 @@ def render_beginner_guide():
                 **What a beginner should focus on first**
 
                 Watch `Signal`, `Trigger-ready`, `VWAP`, `RelVol`, `Stop`, `Target 1`, and `Event risk` before worrying about every advanced field.
+
+                **What the new universes mean**
+
+                `Penny / Low Price Stocks` and `Small / Mid Caps` can move harder than mega caps, but they can also be less liquid and less forgiving. Beginners should size smaller and pay extra attention to spread and event risk.
                 """
             )
 
@@ -129,6 +134,10 @@ def render_beginner_guide():
                 **What this does not mean**
 
                 It does not mean AAPL must go up. It only means several conditions are aligned at the same time. A beginner should still check the chart, verify the live spread, keep size small, and use the stop level as a hard risk boundary.
+
+                **About options**
+
+                This app currently scans the underlying asset first, then uses the option chain as context. It does not yet tell you which exact call or put contract to buy.
                 """
             )
 
@@ -150,6 +159,7 @@ def render_beginner_guide():
                 - `LONG` and `SHORT` are ideas, not instructions.
                 - High `Event risk` can cause fast moves and slippage.
                 - Low-liquidity instruments can move erratically and fill badly.
+                - Penny stocks can behave far worse than large caps when spreads widen.
                 - A good setup with bad risk sizing can still be a bad trade.
 
                 **Good first-demo-account habits**
@@ -289,6 +299,63 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         "window_duration",
     ]
     st.dataframe(display_audit[audit_cols], use_container_width=True, hide_index=True)
+
+
+def render_options_opportunity_board(view: pd.DataFrame):
+    st.subheader("Options opportunity board")
+    st.caption("Ranks underlying assets whose option-chain context looks most interesting. This is still an underlying scanner, not a contract picker.")
+
+    if view.empty:
+        st.info("No scanned assets available for options review.")
+        return
+
+    option_view = view.copy()
+    option_view = option_view[option_view["option_bias"].isin(["BULLISH", "BEARISH", "MIXED"])].copy()
+    if option_view.empty:
+        st.info("No option-enabled assets were found in the current filtered results.")
+        return
+
+    option_view["contract_interest"] = (
+        option_view["call_volume"].fillna(0)
+        + option_view["put_volume"].fillna(0)
+        + option_view["news_count"].fillna(0) * 100
+    )
+    option_view = option_view.sort_values(
+        ["contract_interest", "atm_iv", "conviction"],
+        ascending=[False, False, False],
+    ).head(12)
+
+    summary = option_view.copy()
+    summary["expected_move_hint_pct"] = (summary["atm_iv"].astype(float) * 100 / 16).round(2)
+    option_cols = [
+        "symbol",
+        "signal",
+        "option_bias",
+        "put_call_ratio",
+        "atm_iv",
+        "expected_move_hint_pct",
+        "call_volume",
+        "put_volume",
+        "event_risk",
+        "conviction",
+        "headline",
+    ]
+    st.dataframe(summary[option_cols], use_container_width=True, hide_index=True)
+
+    bull_count = int((option_view["option_bias"] == "BULLISH").sum())
+    bear_count = int((option_view["option_bias"] == "BEARISH").sum())
+    avg_iv = float(option_view["atm_iv"].dropna().mean()) if option_view["atm_iv"].notna().any() else np.nan
+    highest_interest = option_view.iloc[0]["symbol"] if not option_view.empty else "N/A"
+
+    o1, o2, o3, o4 = st.columns(4)
+    with o1:
+        render_metric_card("Option names", str(len(option_view)))
+    with o2:
+        render_metric_card("Bull / Bear bias", f"{bull_count} / {bear_count}")
+    with o3:
+        render_metric_card("Avg ATM IV", "N/A" if pd.isna(avg_iv) else f"{avg_iv:.2f}")
+    with o4:
+        render_metric_card("Top options name", str(highest_interest))
 
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
@@ -488,6 +555,7 @@ with main_left:
 
     styled_view = view[summary_cols].style.apply(row_style, axis=1)
     st.dataframe(styled_view, use_container_width=True, hide_index=True)
+    render_options_opportunity_board(view)
 
 with main_right:
     st.subheader("Watchlist")
