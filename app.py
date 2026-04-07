@@ -15,6 +15,7 @@ from execution import build_order_ticket, get_broker_adapter, ticket_to_frame
 from notifications import (
     get_telegram_bot_token,
     get_telegram_default_chat_id,
+    send_telegram_message,
     send_ready_signal_notifications,
     telegram_alerts_enabled,
 )
@@ -375,6 +376,8 @@ if "telegram_notified_signals" not in st.session_state:
     st.session_state.telegram_notified_signals = {}
 if "telegram_last_status" not in st.session_state:
     st.session_state.telegram_last_status = []
+if "telegram_test_status" not in st.session_state:
+    st.session_state.telegram_test_status = None
 
 st.sidebar.title("Scanner Setup")
 universe_name = st.sidebar.selectbox("Choose universe", list(DEFAULT_UNIVERSES.keys()) + ["Custom"])
@@ -403,6 +406,7 @@ scan_pause = st.sidebar.slider("Pause between requests (seconds)", 0.0, 0.5, 0.0
 max_symbols = st.sidebar.slider("Max symbols to scan", 5, 250, min(50, max(5, len(symbols))))
 auto_refresh = st.sidebar.checkbox("Auto refresh every 2 min", value=False)
 run_scan = st.sidebar.button("Run Pro Scan", type="primary", use_container_width=True)
+test_telegram_ping = st.sidebar.button("Send Telegram test ping", use_container_width=True)
 
 st.title("Pro Intraday Market Scanner")
 st.caption("Ranks symbols for manual intraday decisions using regime, structure, momentum, multi-timeframe alignment, triggers and risk planning.")
@@ -423,6 +427,16 @@ with st.expander("How to use this tool"):
 render_beginner_guide()
 
 regime = detect_market_regime()
+
+if test_telegram_ping:
+    bot_token = get_telegram_bot_token()
+    chat_id = get_telegram_default_chat_id()
+    ping_message = f"Ping from Pro Intraday Scanner at {pd.Timestamp.now(tz=MELBOURNE_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    st.session_state.telegram_test_status = send_telegram_message(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        message=ping_message,
+    )
 
 if run_scan or auto_refresh:
     shortlist = symbols[:max_symbols]
@@ -538,6 +552,12 @@ with summary_right:
                 st.caption(f"Telegram alert run: {sent_ok} sent, {sent_fail} failed.")
         else:
             st.caption("Telegram alerts are off unless `TELEGRAM_ALERTS_ENABLED=true` is set in environment/secrets.")
+        if st.session_state.telegram_test_status is not None:
+            if st.session_state.telegram_test_status.get("ok"):
+                st.success("Telegram ping sent successfully.")
+            else:
+                st.error(f"Telegram ping failed: {st.session_state.telegram_test_status.get('error', 'unknown_error')}")
+                st.caption("If you only added GitHub repository secrets, a local Streamlit app cannot read them. Local runs need environment variables or `.streamlit/secrets.toml`.")
 
 st.markdown("---")
 show_direction = st.radio("Show setups", ["All", "LONG only", "SHORT only"], horizontal=True)
