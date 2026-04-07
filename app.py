@@ -364,6 +364,46 @@ def render_options_opportunity_board(view: pd.DataFrame):
     with o4:
         render_metric_card("Top options name", str(highest_interest))
 
+
+def render_telegram_diagnostics():
+    bot_token = get_telegram_bot_token()
+    chat_id = get_telegram_default_chat_id()
+    test_status = st.session_state.telegram_test_status
+
+    with st.expander("Telegram diagnostics"):
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            render_metric_card("Alerts enabled", "YES" if telegram_alerts_enabled() else "NO")
+        with d2:
+            render_metric_card("Bot token found", "YES" if bot_token else "NO")
+        with d3:
+            render_metric_card("Chat ID found", "YES" if chat_id else "NO")
+
+        if bot_token:
+            masked_token = f"{bot_token[:8]}...{bot_token[-4:]}" if len(bot_token) > 12 else "loaded"
+            st.caption(f"Loaded bot token: {masked_token}")
+        else:
+            st.warning("No `TELEGRAM_BOT_TOKEN` found in local environment or Streamlit secrets.")
+
+        if chat_id:
+            st.caption(f"Loaded chat ID: {chat_id}")
+        else:
+            st.warning("No `TELEGRAM_CHAT_ID` found in local environment or Streamlit secrets.")
+
+        st.caption("If you only added GitHub repository secrets, a local Streamlit app cannot read them. Local runs need Windows environment variables or `.streamlit/secrets.toml`.")
+
+        if test_status is not None:
+            if test_status.get("ok"):
+                st.success("Last Telegram ping succeeded.")
+                if test_status.get("response"):
+                    st.code(str(test_status["response"]), language="json")
+            else:
+                st.error(f"Last Telegram ping failed: {test_status.get('error', 'unknown_error')}")
+
+        if st.session_state.telegram_last_status:
+            st.markdown("**Last alert send attempt**")
+            st.dataframe(pd.DataFrame(st.session_state.telegram_last_status), use_container_width=True, hide_index=True)
+
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "last_scan" not in st.session_state:
@@ -425,6 +465,7 @@ with st.expander("How to use this tool"):
     st.caption("Telegram alerts: store `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally `TELEGRAM_ALERTS_ENABLED=true` in environment variables or Streamlit secrets.")
 
 render_beginner_guide()
+render_telegram_diagnostics()
 
 regime = detect_market_regime()
 
