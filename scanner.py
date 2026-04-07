@@ -408,10 +408,7 @@ def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lo
     if df.empty or len(df) < 35:
         return pd.DataFrame()
 
-    if getattr(df.index, "tz", None) is not None:
-        df.index = df.index.tz_localize(None)
-
-    cutoff = df.index[-1] - pd.Timedelta(hours=lookback_hours)
+    cutoff = pd.Timestamp(df.index[-1]) - pd.Timedelta(hours=lookback_hours)
     rows = []
     for i in range(30, len(df)):
         window = df.iloc[: i + 1]
@@ -497,4 +494,186 @@ def summarize_recent_readiness(timeline: pd.DataFrame, side: str) -> Dict:
         "last_duration": last_completed["duration"] if last_completed else current_duration,
         "events": events[-5:],
     }
+
+
+def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float, stop: float, target1: float) -> Dict:
+    if future_df.empty:
+        return {
+            "exit_price": entry,
+            "actual_pnl": 0.0,
+            "actual_pnl_pct": 0.0,
+            "actual_r": 0.0,
+            "outcome_status": "no_follow_through",
+        }
+
+    risk = max(abs(entry - stop), 1e-6)
+    exit_price = float(future_df["Close"].iloc[-1])
+    outcome_status = "window_exit"
+
+    for _, row in future_df.iterrows():
+        high = float(row["High"])
+        low = float(row["Low"])
+
+        if signal == "LONG":
+            stop_hit = low <= stop
+            target_hit = high >= target1
+            if stop_hit and target_hit:
+                exit_price = stop
+                outcome_status = "stop_hit_same_bar"
+                break
+            if stop_hit:
+                exit_price = stop
+                outcome_status = "stop_hit"
+                break
+            if target_hit:
+                exit_price = target1
+                outcome_status = "target1_hit"
+                break
+        else:
+            stop_hit = high >= stop
+            target_hit = low <= target1
+            if stop_hit and target_hit:
+                exit_price = stop
+                outcome_status = "stop_hit_same_bar"
+                break
+            if stop_hit:
+                exit_price = stop
+                outcome_status = "stop_hit"
+                break
+            if target_hit:
+                exit_price = target1
+                outcome_status = "target1_hit"
+                break
+
+    actual_pnl = exit_price - entry if signal == "LONG" else entry - exit_price
+    return {
+        "exit_price": round(exit_price, 4),
+        "actual_pnl": round(actual_pnl, 4),
+        "actual_pnl_pct": round(actual_pnl / entry * 100, 2) if entry else np.nan,
+        "actual_r": round(actual_pnl / risk, 2) if risk else np.nan,
+        "outcome_status": outcome_status,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = 48) -> pd.DataFrame:
+    history_period = "5d" if interval in {"1m", "2m", "5m", "15m", "30m"} else "1mo"
+    raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
+    if raw.empty or len(raw) < 35:
+        return pd.DataFrame()
+
+    df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
+    if df.empty or len(df) < 35:
+        return pd.DataFrame()
+
+    last_ts = pd.Timestamp(df.index[-1])
+    cutoff = last_ts - pd.Timedelta(hours=lookback_hours)
+
+    rows = []
+    for i in range(30, len(df)):
+        window = df.iloc[: i + 1]
+        levels = support_resistance(window)
+        last = window.iloc[-1]
+        price = float(last["Close"])
+        atr_value = float(last["ATR14"]) if pd.notna(last["ATR14"]) else np.nan
+        long_trigger = entry_trigger("LONG", window, levels)
+        short_trigger = entry_trigger("SHORT", window, levels)
+        long_plan = build_trade_plan("LONG", price, atr_value, levels)
+        short_plan = build_trade_plan("SHORT", price, atr_value, levels)
+        rows.append(
+            {
+                "timestamp": pd.Timestamp(window.index[-1]),
+                "long_ready": bool(long_trigger["ready"]),
+                "short_ready": bool(short_trigger["ready"]),
+                "long_entry": long_plan["entry"],
+                "long_stop": long_plan["stop"],
+                "long_target1": long_plan["target1"],
+                "long_rr1": long_plan["rr1"],
+                "short_entry": short_plan["entry"],
+                "short_stop": short_plan["stop"],
+                "short_target1": short_plan["target1"],
+                "short_rr1": short_plan["rr1"],
+            }
+        )
+
+    timeline = pd.DataFrame(rows)
+    if timeline.empty:
+        return timeline
+
+    audits = []
+    for side in ["LONG", "SHORT"]:
+        ready_col = "long_ready" if side == "LONG" else "short_ready"
+        entry_col = "long_entry" if side == "LONG" else "short_entry"
+        stop_col = "long_stop" if side == "LONG" else "short_stop"
+        target_col = "long_target1" if side == "LONG" else "short_target1"
+        rr_col = "long_rr1" if side == "LONG" else "short_rr1"
+
+        active_start_idx = None
+        previous_ready = False
+        for idx, row in timeline.iterrows():
+            ready = bool(row[ready_col])
+            if ready and not previous_ready:
+                active_start_idx = idx
+            elif not ready and previous_ready and active_start_idx is not None:
+                start_row = timeline.iloc[active_start_idx]
+                end_row = timeline.iloc[idx]
+                start_ts = pd.Timestamp(start_row["timestamp"])
+                end_ts = pd.Timestamp(end_row["timestamp"])
+                if end_ts >= cutoff:
+                    future_df = df[(df.index > start_ts) & (df.index <= end_ts)]
+                    entry = float(start_row[entry_col])
+                    stop = float(start_row[stop_col])
+                    target1 = float(start_row[target_col])
+                    evaluation = _evaluate_readiness_trade(side, future_df, entry, stop, target1)
+                    audits.append(
+                        {
+                            "side": side,
+                            "started": start_ts,
+                            "ended": end_ts,
+                            "window_duration": end_ts - start_ts,
+                            "entry": round(entry, 4),
+                            "stop": round(stop, 4),
+                            "target1": round(target1, 4),
+                            "suggested_profit": round(abs(target1 - entry), 4),
+                            "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
+                            "suggested_loss": round(abs(entry - stop), 4),
+                            "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
+                            "rr1": start_row[rr_col],
+                            **evaluation,
+                        }
+                    )
+                active_start_idx = None
+            previous_ready = ready
+
+        if previous_ready and active_start_idx is not None:
+            start_row = timeline.iloc[active_start_idx]
+            start_ts = pd.Timestamp(start_row["timestamp"])
+            if last_ts >= cutoff:
+                future_df = df[df.index > start_ts]
+                entry = float(start_row[entry_col])
+                stop = float(start_row[stop_col])
+                target1 = float(start_row[target_col])
+                evaluation = _evaluate_readiness_trade(side, future_df, entry, stop, target1)
+                audits.append(
+                    {
+                        "side": side,
+                        "started": start_ts,
+                        "ended": None,
+                        "window_duration": last_ts - start_ts,
+                        "entry": round(entry, 4),
+                        "stop": round(stop, 4),
+                        "target1": round(target1, 4),
+                        "suggested_profit": round(abs(target1 - entry), 4),
+                        "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
+                        "suggested_loss": round(abs(entry - stop), 4),
+                        "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
+                        "rr1": start_row[rr_col],
+                        **evaluation,
+                    }
+                )
+
+    if not audits:
+        return pd.DataFrame()
+
+    return pd.DataFrame(audits).sort_values("started", ascending=False).reset_index(drop=True)
 
