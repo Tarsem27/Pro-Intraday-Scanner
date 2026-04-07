@@ -7,24 +7,27 @@ from urllib.request import Request, urlopen
 import streamlit as st
 
 
-def get_telegram_bot_token() -> str:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    if token:
-        return token
+def _read_secret_or_env(key: str, default: str = "") -> str:
+    value = os.getenv(key, "").strip()
+    if value:
+        return value
     try:
-        return str(st.secrets.get("TELEGRAM_BOT_TOKEN", "")).strip()
+        return str(st.secrets.get(key, default)).strip()
     except Exception:
-        return ""
+        return default
+
+
+def telegram_alerts_enabled() -> bool:
+    raw = _read_secret_or_env("TELEGRAM_ALERTS_ENABLED", "false").lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def get_telegram_bot_token() -> str:
+    return _read_secret_or_env("TELEGRAM_BOT_TOKEN", "")
 
 
 def get_telegram_default_chat_id() -> str:
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if chat_id:
-        return chat_id
-    try:
-        return str(st.secrets.get("TELEGRAM_CHAT_ID", "")).strip()
-    except Exception:
-        return ""
+    return _read_secret_or_env("TELEGRAM_CHAT_ID", "")
 
 
 def send_telegram_message(bot_token: str, chat_id: str, message: str) -> Dict:
