@@ -2,8 +2,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict
 import uuid
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 
 
 def _safe_float(value: Any) -> float | None:
@@ -65,7 +68,7 @@ def build_order_ticket(
 
     return OrderTicket(
         ticket_id=str(uuid.uuid4())[:8],
-        created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        created_at=datetime.now(MELBOURNE_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
         broker_mode=broker_mode,
         symbol=str(selected["symbol"]),
         side=side,
