@@ -10,7 +10,7 @@ import streamlit as st
 from config import DEFAULT_UNIVERSES, DEFAULT_CUSTOM_SYMBOLS
 from data_utils import detect_market_regime, parse_symbol_input
 from execution import build_order_ticket, get_broker_adapter, ticket_to_frame
-from scanner import scan_symbols, backtest_symbol
+from scanner import backtest_symbol, get_readiness_timeline, scan_symbols, summarize_recent_readiness
 from ui_components import render_market_intel, render_metric_card, render_setup_detail
 
 st.set_page_config(page_title="Pro Intraday Scanner", layout="wide")
@@ -165,97 +165,63 @@ def _format_duration(delta: pd.Timedelta | None) -> str:
     return f"{seconds}s"
 
 
-def _ensure_signal_state(history: dict, symbol: str) -> dict:
-    if symbol not in history:
-        history[symbol] = {
-            "LONG": {"active_since": None, "last_started": None, "last_ended": None, "last_duration_seconds": None},
-            "SHORT": {"active_since": None, "last_started": None, "last_ended": None, "last_duration_seconds": None},
-            "last_seen": None,
-        }
-    return history[symbol]
-
-
-def _close_signal_window(signal_state: dict, ended_at: pd.Timestamp):
-    active_since = signal_state.get("active_since")
-    if active_since is None:
-        return
-    started_at = pd.Timestamp(active_since)
-    duration = ended_at - started_at
-    signal_state["last_started"] = started_at.isoformat()
-    signal_state["last_ended"] = ended_at.isoformat()
-    signal_state["last_duration_seconds"] = max(duration.total_seconds(), 0)
-    signal_state["active_since"] = None
-
-
-def update_signal_history(scan_df: pd.DataFrame, scanned_at: pd.Timestamp):
-    history = st.session_state.signal_history
-    if scan_df.empty:
-        return
-
-    for _, row in scan_df.iterrows():
-        symbol = row["symbol"]
-        signal = row["signal"]
-        ready = bool(row["trigger_ready"])
-        symbol_state = _ensure_signal_state(history, symbol)
-        symbol_state["last_seen"] = scanned_at.isoformat()
-
-        active_signal_state = symbol_state[signal]
-        opposite_signal = "SHORT" if signal == "LONG" else "LONG"
-        opposite_signal_state = symbol_state[opposite_signal]
-
-        if ready:
-            if active_signal_state["active_since"] is None:
-                active_signal_state["active_since"] = scanned_at.isoformat()
-            _close_signal_window(opposite_signal_state, scanned_at)
-        else:
-            _close_signal_window(symbol_state["LONG"], scanned_at)
-            _close_signal_window(symbol_state["SHORT"], scanned_at)
-
-
-def render_signal_timing_section(symbol: str):
-    history = st.session_state.signal_history.get(symbol)
+def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool):
+    timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=48)
     st.subheader("Signal timing")
-    st.caption("Tracks when this symbol most recently became `READY` to buy or sell during this app session.")
+    st.caption("Shows when this symbol was `READY` to buy or sell over the last 48 hours based on recent market bars.")
 
-    if not history:
-        st.info("No readiness history yet for this symbol. Run a few scans to build timing confidence.")
+    if timeline.empty:
+        st.info("Not enough recent bar data to build a 48-hour readiness history for this symbol.")
         return
 
-    now_ts = pd.Timestamp.now()
+    summaries = {side: summarize_recent_readiness(timeline, side) for side in ["LONG", "SHORT"]}
     cols = st.columns(2)
     for idx, side in enumerate(["LONG", "SHORT"]):
-        signal_state = history[side]
-        active_since = signal_state.get("active_since")
-        last_started = signal_state.get("last_started")
-        last_ended = signal_state.get("last_ended")
-        last_duration_seconds = signal_state.get("last_duration_seconds")
+        summary = summaries[side]
+        last_started = summary["last_started"]
+        last_ended = summary["last_ended"]
+        last_duration = summary["last_duration"]
 
-        if active_since:
-            active_since_ts = pd.Timestamp(active_since)
-            status_text = f"READY now for {_format_duration(now_ts - active_since_ts)}"
-            last_window = f"Started: {active_since_ts.strftime('%Y-%m-%d %H:%M:%S')}"
-        elif last_started and last_ended:
+        if summary["current_ready"]:
+            status_text = f"READY now for {_format_duration(summary['current_duration'])}"
+            window_text = (
+                f"Current ready window started: {pd.Timestamp(last_started).strftime('%Y-%m-%d %H:%M:%S')}"
+                if last_started is not None
+                else "Current ready window started: N/A"
+            )
+        elif last_started is not None and last_ended is not None:
             status_text = "Not ready now"
-            last_window = (
+            window_text = (
                 f"Last ready window: {pd.Timestamp(last_started).strftime('%Y-%m-%d %H:%M:%S')} "
                 f"to {pd.Timestamp(last_ended).strftime('%Y-%m-%d %H:%M:%S')}"
             )
         else:
-            status_text = "No ready signal seen yet"
-            last_window = "Last ready window: N/A"
-
-        duration_text = (
-            _format_duration(pd.Timedelta(seconds=float(last_duration_seconds)))
-            if last_duration_seconds is not None
-            else "N/A"
-        )
+            status_text = "No ready signal seen in the last 48h"
+            window_text = "Last ready window: N/A"
 
         with cols[idx]:
             with st.container(border=True):
                 st.markdown(f"**{side} readiness**")
                 st.write(status_text)
-                st.caption(last_window)
-                st.caption(f"Last completed duration: {duration_text}")
+                st.caption(window_text)
+                st.caption(f"Most recent duration: {_format_duration(last_duration)}")
+
+    event_rows = []
+    for side in ["LONG", "SHORT"]:
+        for event in summaries[side]["events"]:
+            event_rows.append(
+                {
+                    "side": side,
+                    "started": pd.Timestamp(event["started"]).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ended": pd.Timestamp(event["ended"]).strftime("%Y-%m-%d %H:%M:%S") if event["ended"] is not None else "Still active",
+                    "duration": _format_duration(event["duration"]),
+                    "status": event["status"],
+                }
+            )
+
+    if event_rows:
+        event_df = pd.DataFrame(event_rows).sort_values("started", ascending=False).head(6)
+        st.dataframe(event_df, use_container_width=True, hide_index=True)
 
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
@@ -265,8 +231,6 @@ if "scanned_at" not in st.session_state:
     st.session_state.scanned_at = "Not run"
 if "staged_order" not in st.session_state:
     st.session_state.staged_order = None
-if "signal_history" not in st.session_state:
-    st.session_state.signal_history = {}
 
 st.sidebar.title("Scanner Setup")
 universe_name = st.sidebar.selectbox("Choose universe", list(DEFAULT_UNIVERSES.keys()) + ["Custom"])
@@ -326,8 +290,6 @@ if run_scan or auto_refresh:
     )
     results = raw_results.copy()
     scan_timestamp = pd.Timestamp.now()
-    if not raw_results.empty:
-        update_signal_history(raw_results, scan_timestamp)
     if not results.empty:
         results = results[
             (results["conviction"] >= min_conviction)
@@ -518,7 +480,7 @@ render_setup_detail(
     },
 )
 render_market_intel(selected)
-render_signal_timing_section(selected_symbol)
+render_signal_timing_section(selected_symbol, interval=interval, include_prepost=include_prepost)
 
 st.markdown("---")
 st.subheader("Execution ticket")
