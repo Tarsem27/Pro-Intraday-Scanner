@@ -12,6 +12,11 @@ import streamlit as st
 from config import DEFAULT_UNIVERSES, DEFAULT_CUSTOM_SYMBOLS
 from data_utils import detect_market_regime, parse_symbol_input
 from execution import build_order_ticket, get_broker_adapter, ticket_to_frame
+from notifications import (
+    get_telegram_bot_token,
+    get_telegram_default_chat_id,
+    send_ready_signal_notifications,
+)
 from scanner import (
     backtest_symbol,
     get_readiness_timeline,
@@ -365,6 +370,10 @@ if "scanned_at" not in st.session_state:
     st.session_state.scanned_at = "Not run"
 if "staged_order" not in st.session_state:
     st.session_state.staged_order = None
+if "telegram_notified_signals" not in st.session_state:
+    st.session_state.telegram_notified_signals = {}
+if "telegram_last_status" not in st.session_state:
+    st.session_state.telegram_last_status = []
 
 st.sidebar.title("Scanner Setup")
 universe_name = st.sidebar.selectbox("Choose universe", list(DEFAULT_UNIVERSES.keys()) + ["Custom"])
@@ -392,6 +401,12 @@ options_filter = st.sidebar.selectbox("Options flow filter", ["All", "Bullish on
 scan_pause = st.sidebar.slider("Pause between requests (seconds)", 0.0, 0.5, 0.0, 0.05)
 max_symbols = st.sidebar.slider("Max symbols to scan", 5, 250, min(50, max(5, len(symbols))))
 auto_refresh = st.sidebar.checkbox("Auto refresh every 2 min", value=False)
+telegram_enabled = st.sidebar.checkbox("Telegram alerts", value=False)
+telegram_chat_id = st.sidebar.text_input(
+    "Telegram chat ID",
+    value=get_telegram_default_chat_id(),
+    help="Keep your bot token in TELEGRAM_BOT_TOKEN env var or Streamlit secrets. Put the chat ID here or in TELEGRAM_CHAT_ID.",
+)
 run_scan = st.sidebar.button("Run Pro Scan", type="primary", use_container_width=True)
 
 st.title("Pro Intraday Market Scanner")
@@ -408,6 +423,7 @@ with st.expander("How to use this tool"):
         5. Backtest before trusting any idea too much.
         """
     )
+    st.caption("Telegram alerts: set a fresh bot token in `TELEGRAM_BOT_TOKEN`, set your chat ID, then enable `Telegram alerts` in the sidebar.")
 
 render_beginner_guide()
 
@@ -436,6 +452,16 @@ if run_scan or auto_refresh:
             results = results[results["trigger_ready"]].reset_index(drop=True)
     st.session_state.last_scan = results
     st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+    if telegram_enabled:
+        bot_token = get_telegram_bot_token()
+        ready_alerts = results[results["trigger_ready"]].copy() if not results.empty else pd.DataFrame()
+        st.session_state.telegram_last_status = send_ready_signal_notifications(
+            ready_df=ready_alerts,
+            bot_token=bot_token,
+            chat_id=telegram_chat_id.strip(),
+            scan_time_label=st.session_state.scanned_at,
+            notified_cache=st.session_state.telegram_notified_signals,
+        )
 
 results = st.session_state.last_scan
 if not results.empty:
@@ -505,6 +531,15 @@ with summary_right:
         )
         st.caption("If the market is mixed or choppy, the scanner will naturally produce weaker setups.")
         st.caption("News, options, and event risk below are public-data enrichments. Spread is still a labeled proxy unless you wire in a broker feed.")
+        if telegram_enabled:
+            if not get_telegram_bot_token():
+                st.warning("Telegram alerts are enabled, but no bot token was found in environment/secrets.")
+            elif not telegram_chat_id.strip():
+                st.warning("Telegram alerts are enabled, but no chat ID was provided.")
+            elif st.session_state.telegram_last_status:
+                sent_ok = sum(1 for item in st.session_state.telegram_last_status if item.get("ok"))
+                sent_fail = sum(1 for item in st.session_state.telegram_last_status if not item.get("ok"))
+                st.caption(f"Telegram alert run: {sent_ok} sent, {sent_fail} failed.")
 
 st.markdown("---")
 show_direction = st.radio("Show setups", ["All", "LONG only", "SHORT only"], horizontal=True)
