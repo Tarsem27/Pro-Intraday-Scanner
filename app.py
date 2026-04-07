@@ -3,17 +3,27 @@
 # ==============================
 from datetime import datetime
 import time
+from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from config import DEFAULT_UNIVERSES, DEFAULT_CUSTOM_SYMBOLS
 from data_utils import detect_market_regime, parse_symbol_input
 from execution import build_order_ticket, get_broker_adapter, ticket_to_frame
-from scanner import backtest_symbol, get_readiness_timeline, scan_symbols, summarize_recent_readiness
+from scanner import (
+    backtest_symbol,
+    get_readiness_timeline,
+    get_readiness_trade_audit,
+    scan_symbols,
+    summarize_recent_readiness,
+)
 from ui_components import render_market_intel, render_metric_card, render_setup_detail
 
 st.set_page_config(page_title="Pro Intraday Scanner", layout="wide")
+
+MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 
 RESULT_DEFAULTS = {
     "news_sentiment": "UNKNOWN",
@@ -165,10 +175,21 @@ def _format_duration(delta: pd.Timedelta | None) -> str:
     return f"{seconds}s"
 
 
+def _format_melbourne_time(value) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    ts = ts.tz_convert(MELBOURNE_TZ)
+    return ts.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool):
     timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=48)
+    audit_df = get_readiness_trade_audit(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=48)
     st.subheader("Signal timing")
-    st.caption("Shows when this symbol was `READY` to buy or sell over the last 48 hours based on recent market bars.")
+    st.caption("Shows when this symbol was `READY` to buy or sell over the last 48 hours based on recent market bars. All times below are in Melbourne time.")
 
     if timeline.empty:
         st.info("Not enough recent bar data to build a 48-hour readiness history for this symbol.")
@@ -185,15 +206,15 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         if summary["current_ready"]:
             status_text = f"READY now for {_format_duration(summary['current_duration'])}"
             window_text = (
-                f"Current ready window started: {pd.Timestamp(last_started).strftime('%Y-%m-%d %H:%M:%S')}"
+                f"Current ready window started: {_format_melbourne_time(last_started)}"
                 if last_started is not None
                 else "Current ready window started: N/A"
             )
         elif last_started is not None and last_ended is not None:
             status_text = "Not ready now"
             window_text = (
-                f"Last ready window: {pd.Timestamp(last_started).strftime('%Y-%m-%d %H:%M:%S')} "
-                f"to {pd.Timestamp(last_ended).strftime('%Y-%m-%d %H:%M:%S')}"
+                f"Last ready window: {_format_melbourne_time(last_started)} "
+                f"to {_format_melbourne_time(last_ended)}"
             )
         else:
             status_text = "No ready signal seen in the last 48h"
@@ -212,8 +233,8 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
             event_rows.append(
                 {
                     "side": side,
-                    "started": pd.Timestamp(event["started"]).strftime("%Y-%m-%d %H:%M:%S"),
-                    "ended": pd.Timestamp(event["ended"]).strftime("%Y-%m-%d %H:%M:%S") if event["ended"] is not None else "Still active",
+                    "started": _format_melbourne_time(event["started"]),
+                    "ended": _format_melbourne_time(event["ended"]) if event["ended"] is not None else "Still active",
                     "duration": _format_duration(event["duration"]),
                     "status": event["status"],
                 }
@@ -222,6 +243,52 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     if event_rows:
         event_df = pd.DataFrame(event_rows).sort_values("started", ascending=False).head(6)
         st.dataframe(event_df, use_container_width=True, hide_index=True)
+
+    st.markdown("**Recent signal audit**")
+    st.caption("Assumption: entry at the ready bar, planned profit uses `Target 1`, planned risk uses `Stop`, and actual result exits at target, stop, or when the readiness window ends.")
+
+    if audit_df.empty:
+        st.info("No recent ready events with enough follow-through data were found for audit over the last 48 hours.")
+        return
+
+    recent_audit = audit_df.head(10).copy()
+    completed_audit = recent_audit[recent_audit["outcome_status"] != "no_follow_through"].copy()
+    win_count = int((completed_audit["actual_pnl"] > 0).sum()) if not completed_audit.empty else 0
+    loss_count = int((completed_audit["actual_pnl"] < 0).sum()) if not completed_audit.empty else 0
+    flat_count = int((completed_audit["actual_pnl"] == 0).sum()) if not completed_audit.empty else 0
+    total_pnl = float(completed_audit["actual_pnl"].sum()) if not completed_audit.empty else 0.0
+
+    a1, a2, a3, a4 = st.columns(4)
+    with a1:
+        render_metric_card("Audited signals", str(len(recent_audit)))
+    with a2:
+        render_metric_card("Wins / Losses", f"{win_count} / {loss_count}")
+    with a3:
+        render_metric_card("Flat exits", str(flat_count))
+    with a4:
+        render_metric_card("Net actual P/L", f"{total_pnl:.4f}")
+
+    display_audit = recent_audit.copy()
+    display_audit["started"] = display_audit["started"].apply(_format_melbourne_time)
+    display_audit["ended"] = display_audit["ended"].apply(_format_melbourne_time)
+    display_audit["window_duration"] = display_audit["window_duration"].apply(_format_duration)
+    display_audit["result"] = np.where(display_audit["actual_pnl"] > 0, "Win", np.where(display_audit["actual_pnl"] < 0, "Loss", "Flat"))
+    audit_cols = [
+        "started",
+        "side",
+        "entry",
+        "stop",
+        "target1",
+        "suggested_profit",
+        "suggested_loss",
+        "exit_price",
+        "actual_pnl",
+        "actual_r",
+        "result",
+        "outcome_status",
+        "window_duration",
+    ]
+    st.dataframe(display_audit[audit_cols], use_container_width=True, hide_index=True)
 
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
@@ -262,6 +329,7 @@ run_scan = st.sidebar.button("Run Pro Scan", type="primary", use_container_width
 
 st.title("Pro Intraday Market Scanner")
 st.caption("Ranks symbols for manual intraday decisions using regime, structure, momentum, multi-timeframe alignment, triggers and risk planning.")
+st.caption("All displayed times use Australia/Melbourne.")
 
 with st.expander("How to use this tool"):
     st.write(
@@ -289,7 +357,7 @@ if run_scan or auto_refresh:
         regime=regime,
     )
     results = raw_results.copy()
-    scan_timestamp = pd.Timestamp.now()
+    scan_timestamp = pd.Timestamp.now(tz=MELBOURNE_TZ)
     if not results.empty:
         results = results[
             (results["conviction"] >= min_conviction)
@@ -300,7 +368,7 @@ if run_scan or auto_refresh:
         if only_trigger_ready:
             results = results[results["trigger_ready"]].reset_index(drop=True)
     st.session_state.last_scan = results
-    st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 results = st.session_state.last_scan
 if not results.empty:
@@ -583,7 +651,7 @@ csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 st.download_button(
     "Download results as CSV",
     data=csv_bytes,
-    file_name=f"pro_intraday_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    file_name=f"pro_intraday_scan_{datetime.now(MELBOURNE_TZ).strftime('%Y%m%d_%H%M%S')}.csv",
     mime="text/csv",
 )
 
