@@ -396,3 +396,105 @@ def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
         "avg_r": round(float(np.mean(trades)), 2),
     }
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = 48) -> pd.DataFrame:
+    history_period = "5d" if interval in {"1m", "2m", "5m", "15m", "30m"} else "1mo"
+    raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
+    if raw.empty or len(raw) < 35:
+        return pd.DataFrame()
+
+    df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
+    if df.empty or len(df) < 35:
+        return pd.DataFrame()
+
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
+
+    cutoff = df.index[-1] - pd.Timedelta(hours=lookback_hours)
+    rows = []
+    for i in range(30, len(df)):
+        window = df.iloc[: i + 1]
+        levels = support_resistance(window)
+        long_trigger = entry_trigger("LONG", window, levels)
+        short_trigger = entry_trigger("SHORT", window, levels)
+        rows.append(
+            {
+                "timestamp": pd.Timestamp(window.index[-1]),
+                "long_ready": bool(long_trigger["ready"]),
+                "short_ready": bool(short_trigger["ready"]),
+            }
+        )
+
+    timeline = pd.DataFrame(rows)
+    if timeline.empty:
+        return timeline
+
+    recent_positions = timeline.index[timeline["timestamp"] >= cutoff].tolist()
+    if recent_positions:
+        start_pos = max(0, recent_positions[0] - 1)
+        timeline = timeline.iloc[start_pos:].reset_index(drop=True)
+    return timeline
+
+
+def summarize_recent_readiness(timeline: pd.DataFrame, side: str) -> Dict:
+    if timeline.empty:
+        return {
+            "current_ready": False,
+            "current_duration": None,
+            "last_started": None,
+            "last_ended": None,
+            "last_duration": None,
+            "events": [],
+        }
+
+    column = "long_ready" if side == "LONG" else "short_ready"
+    active_start = None
+    previous_ready = False
+    events = []
+
+    for _, row in timeline.iterrows():
+        ts = pd.Timestamp(row["timestamp"])
+        ready = bool(row[column])
+        if ready and not previous_ready:
+            active_start = ts
+        elif not ready and previous_ready and active_start is not None:
+            duration = ts - active_start
+            events.append(
+                {
+                    "side": side,
+                    "started": active_start,
+                    "ended": ts,
+                    "duration": duration,
+                    "status": "completed",
+                }
+            )
+            active_start = None
+        previous_ready = ready
+
+    last_ts = pd.Timestamp(timeline["timestamp"].iloc[-1])
+    current_duration = None
+    if previous_ready and active_start is not None:
+        current_duration = last_ts - active_start
+        events.append(
+            {
+                "side": side,
+                "started": active_start,
+                "ended": None,
+                "duration": current_duration,
+                "status": "active",
+            }
+        )
+
+    completed_events = [event for event in events if event["status"] == "completed"]
+    last_completed = completed_events[-1] if completed_events else None
+
+    return {
+        "current_ready": previous_ready,
+        "current_duration": current_duration,
+        "last_started": last_completed["started"] if last_completed else (active_start if previous_ready else None),
+        "last_ended": last_completed["ended"] if last_completed else None,
+        "last_duration": last_completed["duration"] if last_completed else current_duration,
+        "events": events[-5:],
+    }
+
