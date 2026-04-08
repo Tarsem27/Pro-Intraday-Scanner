@@ -12,7 +12,7 @@ from data_utils import add_indicators, download_history, normalize_score
 from market_intel import get_symbol_intel
 
 
-READINESS_LOOKBACK_HOURS = 24 * 10
+READINESS_LOOKBACK_HOURS = 24 * 30
 RSI_NEUTRAL_LOW = 45
 RSI_NEUTRAL_HIGH = 55
 MIN_SETUP_RELVOL = 0.9
@@ -182,9 +182,11 @@ def _quality_score(
 def _history_period_for_interval(interval: str) -> str:
     if interval == "1m":
         return "7d"
-    if interval in {"2m", "5m", "15m", "30m", "60m"}:
-        return "1mo"
-    return "3mo"
+    if interval in {"2m", "5m", "15m", "30m"}:
+        return "2mo"
+    if interval == "60m":
+        return "3mo"
+    return "6mo"
 
 
 def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: bool, regime: Dict) -> Dict:
@@ -611,6 +613,53 @@ def summarize_recent_readiness(timeline: pd.DataFrame, side: str) -> Dict:
         "last_duration": last_completed["duration"] if last_completed else current_duration,
         "events": events[-5:],
     }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_recent_ready_assets(symbols: List[str], interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+    rows = []
+    for symbol in symbols:
+        timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=lookback_hours)
+        if timeline.empty:
+            continue
+
+        long_summary = summarize_recent_readiness(timeline, "LONG")
+        short_summary = summarize_recent_readiness(timeline, "SHORT")
+        long_starts = int((timeline["long_ready"] & ~timeline["long_ready"].shift(fill_value=False)).sum())
+        short_starts = int((timeline["short_ready"] & ~timeline["short_ready"].shift(fill_value=False)).sum())
+
+        candidates = []
+        if long_summary["last_started"] is not None:
+            candidates.append(("LONG", pd.Timestamp(long_summary["last_started"])))
+        if short_summary["last_started"] is not None:
+            candidates.append(("SHORT", pd.Timestamp(short_summary["last_started"])))
+
+        if not candidates and long_starts == 0 and short_starts == 0:
+            continue
+
+        last_side, last_ready_at = max(candidates, key=lambda item: item[1]) if candidates else ("N/A", pd.NaT)
+        current_ready_side = "LONG" if long_summary["current_ready"] else ("SHORT" if short_summary["current_ready"] else "NO")
+
+        rows.append(
+            {
+                "symbol": symbol,
+                "currently_ready": current_ready_side != "NO",
+                "current_ready_side": current_ready_side,
+                "last_ready_side": last_side,
+                "last_ready_at": last_ready_at,
+                "long_ready_events": long_starts,
+                "short_ready_events": short_starts,
+                "total_ready_events": long_starts + short_starts,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows).sort_values(
+        ["currently_ready", "last_ready_at", "total_ready_events"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
 
 
 def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float, stop: float, target1: float) -> Dict:
