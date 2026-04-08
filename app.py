@@ -285,6 +285,43 @@ def apply_acceptance_criteria(
     return evaluated
 
 
+def apply_display_filters(
+    frame: pd.DataFrame,
+    *,
+    show_direction: str,
+    event_risk_filter: str,
+    news_filter: str,
+    options_filter: str,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+
+    filtered = frame.copy()
+    if show_direction == "LONG only":
+        filtered = filtered[filtered["signal"] == "LONG"].reset_index(drop=True)
+    elif show_direction == "SHORT only":
+        filtered = filtered[filtered["signal"] == "SHORT"].reset_index(drop=True)
+
+    if event_risk_filter == "Hide HIGH":
+        filtered = filtered[filtered["event_risk"] != "HIGH"].reset_index(drop=True)
+    elif event_risk_filter == "Only HIGH":
+        filtered = filtered[filtered["event_risk"] == "HIGH"].reset_index(drop=True)
+
+    if news_filter == "Bullish only":
+        filtered = filtered[filtered["news_sentiment"] == "BULLISH"].reset_index(drop=True)
+    elif news_filter == "Bearish only":
+        filtered = filtered[filtered["news_sentiment"] == "BEARISH"].reset_index(drop=True)
+    elif news_filter == "Neutral only":
+        filtered = filtered[filtered["news_sentiment"] == "NEUTRAL"].reset_index(drop=True)
+
+    if options_filter == "Bullish only":
+        filtered = filtered[filtered["option_bias"] == "BULLISH"].reset_index(drop=True)
+    elif options_filter == "Bearish only":
+        filtered = filtered[filtered["option_bias"] == "BEARISH"].reset_index(drop=True)
+
+    return filtered
+
+
 def render_acceptance_diagnostics(all_results: pd.DataFrame):
     st.subheader("Acceptance diagnostics")
     st.caption("Shows how the current acceptance criteria are filtering the latest scan, so you can tune thresholds without guessing.")
@@ -317,6 +354,114 @@ def render_acceptance_diagnostics(all_results: pd.DataFrame):
     breakdown["rate_pct"] = (breakdown["count"] / total * 100).round(1)
     breakdown["acceptance_status"] = breakdown["acceptance_status"].str.replace("_", " ").str.title()
     st.dataframe(breakdown, use_container_width=True, hide_index=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_portfolio_trade_audit(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
+    audit_frames = []
+    for symbol in symbols:
+        symbol_audit = get_readiness_trade_audit(
+            symbol,
+            interval=interval,
+            include_prepost=include_prepost,
+            lookback_hours=READINESS_LOOKBACK_HOURS,
+            mode=history_mode,
+        )
+        if symbol_audit.empty:
+            continue
+        enriched = symbol_audit.copy()
+        enriched["symbol"] = symbol
+        audit_frames.append(enriched)
+
+    if not audit_frames:
+        return pd.DataFrame()
+
+    return pd.concat(audit_frames, ignore_index=True)
+
+
+def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, include_prepost: bool, history_mode: str):
+    st.subheader("Profitable Traits")
+    st.caption(
+        "Tracks what has actually been making money lately across the scanned symbols, "
+        "using the same readiness audit engine that powers the timing section."
+    )
+
+    if all_results.empty:
+        st.caption("Run a scan first to build profitability stats.")
+        return
+
+    audit_df = get_portfolio_trade_audit(all_results["symbol"].dropna().tolist(), interval=interval, include_prepost=include_prepost, history_mode=history_mode)
+    if audit_df.empty:
+        st.info("No audited trades were available across the latest scanned symbols.")
+        return
+
+    completed = audit_df[audit_df["outcome_status"] != "no_follow_through"].copy()
+    if completed.empty:
+        st.info("Audits were found, but none had enough follow-through yet to score as wins or losses.")
+        return
+
+    total_trades = len(completed)
+    win_rate = (completed["actual_pnl"] > 0).mean() * 100 if total_trades else 0.0
+    avg_r = float(completed["actual_r"].mean()) if completed["actual_r"].notna().any() else np.nan
+    net_pnl = float(completed["actual_pnl"].sum())
+
+    p1, p2, p3, p4 = st.columns(4)
+    with p1:
+        render_metric_card("Audited trades", str(total_trades))
+    with p2:
+        render_metric_card("Win rate", f"{win_rate:.1f}%")
+    with p3:
+        render_metric_card("Avg R", "N/A" if pd.isna(avg_r) else f"{avg_r:.2f}")
+    with p4:
+        render_metric_card("Net P/L", f"{net_pnl:.4f}")
+
+    symbol_stats = (
+        completed.groupby("symbol", dropna=False)
+        .agg(
+            trades=("symbol", "size"),
+            win_rate=("actual_pnl", lambda s: round((s > 0).mean() * 100, 1)),
+            avg_r=("actual_r", "mean"),
+            net_pnl=("actual_pnl", "sum"),
+        )
+        .reset_index()
+        .sort_values(["net_pnl", "avg_r", "trades"], ascending=[False, False, False])
+    )
+    symbol_stats["avg_r"] = symbol_stats["avg_r"].round(2)
+    symbol_stats["net_pnl"] = symbol_stats["net_pnl"].round(4)
+
+    side_stats = (
+        completed.groupby("side", dropna=False)
+        .agg(
+            trades=("side", "size"),
+            win_rate=("actual_pnl", lambda s: round((s > 0).mean() * 100, 1)),
+            avg_r=("actual_r", "mean"),
+            net_pnl=("actual_pnl", "sum"),
+        )
+        .reset_index()
+        .sort_values("net_pnl", ascending=False)
+    )
+    side_stats["avg_r"] = side_stats["avg_r"].round(2)
+    side_stats["net_pnl"] = side_stats["net_pnl"].round(4)
+
+    recent_trades = completed.sort_values("started", ascending=False).head(10).copy()
+    recent_trades["started"] = recent_trades["started"].apply(_format_melbourne_time)
+    recent_trades["ended"] = recent_trades["ended"].apply(_format_melbourne_time)
+    recent_trades["result"] = np.where(recent_trades["actual_pnl"] > 0, "Win", "Loss")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Top symbols lately**")
+        st.dataframe(symbol_stats.head(10), use_container_width=True, hide_index=True)
+    with right:
+        st.markdown("**Long vs Short performance**")
+        st.dataframe(side_stats, use_container_width=True, hide_index=True)
+
+    st.markdown("**Recent audited trades**")
+    st.dataframe(
+        recent_trades[["symbol", "started", "side", "result", "outcome_status", "actual_r", "actual_pnl", "ended"]],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool, history_mode: str):
@@ -604,7 +749,6 @@ mode_options = list(SCANNER_MODES.keys())
 default_scan_mode_index = mode_options.index(DEFAULT_SCAN_MODE) if DEFAULT_SCAN_MODE in mode_options else 0
 default_history_mode_index = mode_options.index(DEFAULT_HISTORY_MODE) if DEFAULT_HISTORY_MODE in mode_options else 0
 scan_mode = st.sidebar.selectbox("Scanner mode", mode_options, index=default_scan_mode_index)
-history_mode = st.sidebar.selectbox("History mode", mode_options, index=default_history_mode_index)
 mode_defaults = SCANNER_MODES[scan_mode]
 include_prepost = st.sidebar.checkbox("Include pre/post market", value=True)
 min_conviction = st.sidebar.slider("Minimum conviction", 0, 100, 45)
@@ -612,46 +756,48 @@ min_relvol = st.sidebar.slider("Minimum relative volume", 0.0, 5.0, 0.5, 0.1)
 min_abs_change = st.sidebar.slider("Minimum absolute % move", 0.0, 10.0, 0.2, 0.1)
 max_spread_proxy = st.sidebar.slider("Max spread proxy %", 0.1, 5.0, 2.0, 0.1)
 only_trigger_ready = st.sidebar.checkbox("Only show trigger-ready setups", value=False)
-event_risk_filter = st.sidebar.selectbox("Event risk filter", ["All", "Hide HIGH", "Only HIGH"], index=0)
-news_filter = st.sidebar.selectbox("News tone filter", ["All", "Bullish only", "Bearish only", "Neutral only"], index=0)
-options_filter = st.sidebar.selectbox("Options flow filter", ["All", "Bullish only", "Bearish only"], index=0)
-st.sidebar.markdown("**Acceptance criteria**")
-accept_min_quality = st.sidebar.slider(
-    "Minimum quality score",
-    0,
-    7,
-    int(mode_defaults["min_quality_score"]),
-    1,
-)
-accept_min_setup_relvol = st.sidebar.slider(
-    "Minimum setup rel vol",
-    0.0,
-    3.0,
-    float(mode_defaults["min_setup_relvol"]),
-    0.05,
-)
-accept_neutral_rsi = st.sidebar.slider(
-    "Neutral RSI zone",
-    0,
-    100,
-    (int(mode_defaults["rsi_neutral_low"]), int(mode_defaults["rsi_neutral_high"])),
-    1,
-)
-accept_min_vwap_gap = st.sidebar.slider(
-    "Minimum VWAP gap %",
-    0.0,
-    1.0,
-    float(mode_defaults["min_vwap_distance_pct"]),
-    0.01,
-)
-block_choppy_regime = st.sidebar.checkbox(
-    "Reject CHOPPY regime",
-    value=bool(mode_defaults["hard_block_choppy"]),
-)
-block_high_event_risk = st.sidebar.checkbox(
-    "Reject HIGH event risk",
-    value=bool(mode_defaults["hard_block_high_event"]),
-)
+with st.sidebar.expander("Advanced tuning", expanded=False):
+    history_mode = st.selectbox("History mode", mode_options, index=default_history_mode_index)
+    event_risk_filter = st.selectbox("Event risk filter", ["All", "Hide HIGH", "Only HIGH"], index=0)
+    news_filter = st.selectbox("News tone filter", ["All", "Bullish only", "Bearish only", "Neutral only"], index=0)
+    options_filter = st.selectbox("Options flow filter", ["All", "Bullish only", "Bearish only"], index=0)
+    st.markdown("**Acceptance criteria**")
+    accept_min_quality = st.slider(
+        "Minimum quality score",
+        0,
+        7,
+        int(mode_defaults["min_quality_score"]),
+        1,
+    )
+    accept_min_setup_relvol = st.slider(
+        "Minimum setup rel vol",
+        0.0,
+        3.0,
+        float(mode_defaults["min_setup_relvol"]),
+        0.05,
+    )
+    accept_neutral_rsi = st.slider(
+        "Neutral RSI zone",
+        0,
+        100,
+        (int(mode_defaults["rsi_neutral_low"]), int(mode_defaults["rsi_neutral_high"])),
+        1,
+    )
+    accept_min_vwap_gap = st.slider(
+        "Minimum VWAP gap %",
+        0.0,
+        1.0,
+        float(mode_defaults["min_vwap_distance_pct"]),
+        0.01,
+    )
+    block_choppy_regime = st.checkbox(
+        "Reject CHOPPY regime",
+        value=bool(mode_defaults["hard_block_choppy"]),
+    )
+    block_high_event_risk = st.checkbox(
+        "Reject HIGH event risk",
+        value=bool(mode_defaults["hard_block_high_event"]),
+    )
 scan_pause = st.sidebar.slider("Pause between requests (seconds)", 0.0, 0.5, 0.0, 0.05)
 max_symbols = st.sidebar.slider("Max symbols to scan", 5, 250, min(50, max(5, len(symbols))))
 auto_refresh = st.sidebar.checkbox("Auto refresh every 2 min", value=False)
@@ -850,34 +996,26 @@ with summary_right:
 
 st.markdown("---")
 show_direction = st.radio("Show setups", ["All", "LONG only", "SHORT only"], horizontal=True)
-view = results.copy()
-if show_direction == "LONG only":
-    view = view[view["signal"] == "LONG"].reset_index(drop=True)
-elif show_direction == "SHORT only":
-    view = view[view["signal"] == "SHORT"].reset_index(drop=True)
+accepted_view = apply_display_filters(
+    results,
+    show_direction=show_direction,
+    event_risk_filter=event_risk_filter,
+    news_filter=news_filter,
+    options_filter=options_filter,
+)
+candidate_view = apply_display_filters(
+    all_results,
+    show_direction=show_direction,
+    event_risk_filter=event_risk_filter,
+    news_filter=news_filter,
+    options_filter=options_filter,
+)
 
-if event_risk_filter == "Hide HIGH":
-    view = view[view["event_risk"] != "HIGH"].reset_index(drop=True)
-elif event_risk_filter == "Only HIGH":
-    view = view[view["event_risk"] == "HIGH"].reset_index(drop=True)
-
-if news_filter == "Bullish only":
-    view = view[view["news_sentiment"] == "BULLISH"].reset_index(drop=True)
-elif news_filter == "Bearish only":
-    view = view[view["news_sentiment"] == "BEARISH"].reset_index(drop=True)
-elif news_filter == "Neutral only":
-    view = view[view["news_sentiment"] == "NEUTRAL"].reset_index(drop=True)
-
-if options_filter == "Bullish only":
-    view = view[view["option_bias"] == "BULLISH"].reset_index(drop=True)
-elif options_filter == "Bearish only":
-    view = view[view["option_bias"] == "BEARISH"].reset_index(drop=True)
-
-if view.empty and not results.empty:
+if accepted_view.empty and not results.empty:
     st.warning("Your current directional/news/event/options filters removed every qualified setup. You can still inspect the scanned symbols below.")
 
 summary_cols = [
-    "symbol", "signal", "trigger_ready", "quality_score", "conviction", "price", "change_pct", "relvol", "rsi",
+    "symbol", "accepted", "status", "signal", "trigger_ready", "quality_score", "conviction", "price", "change_pct", "relvol", "rsi",
     "atr_pct", "spread_proxy_pct", "news_sentiment", "option_bias", "event_risk",
     "liquidity_label", "mtf_state", "entry", "stop", "target1", "rr1", "reasons"
 ]
@@ -885,20 +1023,32 @@ summary_cols = [
 main_left, main_right = st.columns([1.35, 1])
 
 with main_left:
-    st.subheader("Ranked candidates")
-    if view.empty:
-        st.info("No qualified rows to rank with the current filters.")
+    st.subheader("Best watch candidates")
+    st.caption("This list stays populated even when nothing is currently accepted, so you still have symbols to study and stalk.")
+    if candidate_view.empty:
+        st.info("No candidates remain after the current display filters.")
     else:
-        def row_style(row):
-            signal_bg = '#e8f5e9' if row['signal'] == 'LONG' else '#ffebee'
-            trigger_bg = '#fff8e1' if row['trigger_ready'] else ''
-            return ['background-color: ' + signal_bg if col == 'signal' else ('background-color: ' + trigger_bg if col == 'trigger_ready' else '') for col in row.index]
+        display_candidates = candidate_view.copy()
+        display_candidates["accepted"] = np.where(display_candidates["accepted"], "YES", "NO")
+        display_candidates["status"] = display_candidates["status"].str.replace("_", " ").str.title()
 
-        styled_view = view[summary_cols].style.apply(row_style, axis=1)
+        def row_style(row):
+            signal_bg = "#e8f5e9" if row["signal"] == "LONG" else "#ffebee"
+            trigger_bg = "#fff8e1" if row["trigger_ready"] else ""
+            accepted_bg = "#eef7ff" if row["accepted"] == "YES" else "#f5f5f5"
+            return [
+                "background-color: " + signal_bg if col == "signal"
+                else ("background-color: " + trigger_bg if col == "trigger_ready"
+                else ("background-color: " + accepted_bg if col == "accepted" else ""))
+                for col in row.index
+            ]
+
+        styled_view = display_candidates[summary_cols].style.apply(row_style, axis=1)
         st.dataframe(styled_view, use_container_width=True, hide_index=True)
-        render_options_opportunity_board(view)
+        render_options_opportunity_board(accepted_view if not accepted_view.empty else candidate_view)
 
     render_acceptance_diagnostics(all_results)
+    render_profitable_traits_section(all_results, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
 
     blocked = all_results[all_results["accepted"] == False].copy() if not all_results.empty else pd.DataFrame()
     st.subheader("Rejected symbols diagnostics")
@@ -915,7 +1065,7 @@ with main_left:
 
 with main_right:
     st.subheader("Watchlist")
-    watchlist_source = view["symbol"].tolist() if not view.empty else all_results["symbol"].tolist()
+    watchlist_source = accepted_view["symbol"].tolist() if not accepted_view.empty else candidate_view["symbol"].tolist()
     add_symbol = st.selectbox("Add symbol to watchlist", [""] + watchlist_source)
     wc1, wc2 = st.columns([1, 1])
     with wc1:
@@ -933,15 +1083,18 @@ with main_right:
             st.caption("No symbols in watchlist yet.")
 
     st.subheader("Top 5 now")
-    if view.empty:
-        st.caption("No qualified setups to rank right now.")
+    top_now = accepted_view.head(5) if not accepted_view.empty else candidate_view.head(5)
+    if top_now.empty:
+        st.caption("No current candidates to rank right now.")
     else:
-        for i, row in view.head(5).iterrows():
+        for i, row in top_now.iterrows():
             signal_badge = "🟢 LONG" if row["signal"] == "LONG" else "🔴 SHORT"
             trigger_badge = "⚡ READY" if row["trigger_ready"] else "⏳ WAIT"
+            accepted_badge = "ACCEPTED" if row.get("accepted", False) else f"FILTERED: {str(row.get('status', 'unknown')).replace('_', ' ').upper()}"
             with st.container(border=True):
                 st.markdown(
                     f"**#{i+1} {row['symbol']}** — {signal_badge} | {trigger_badge}  \
+{accepted_badge}  \
 Quality: **{row['quality_score']}** | Conviction: **{row['conviction']:.1f}** | Move: **{row['change_pct']}%** | RelVol: **{row['relvol']}** | RSI: **{row['rsi']}** | RR1: **{row['rr1']}**"
                 )
                 st.caption(row["reasons"])
