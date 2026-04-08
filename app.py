@@ -21,7 +21,10 @@ from notifications import (
     telegram_alerts_enabled,
 )
 from scanner import (
+    DEFAULT_HISTORY_MODE,
+    DEFAULT_SCAN_MODE,
     READINESS_LOOKBACK_HOURS,
+    SCANNER_MODES,
     backtest_symbol,
     get_recent_ready_assets,
     get_readiness_timeline,
@@ -217,12 +220,27 @@ def _format_melbourne_time(value) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool):
+def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool, history_mode: str):
     lookback_days = READINESS_LOOKBACK_HOURS // 24
-    timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
-    audit_df = get_readiness_trade_audit(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
+    timeline = get_readiness_timeline(
+        symbol,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
+    audit_df = get_readiness_trade_audit(
+        symbol,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
     st.subheader("Signal timing")
-    st.caption(f"Shows when this symbol was `READY` to buy or sell over the last {lookback_days} days based on recent market bars. All times below are in Melbourne time.")
+    st.caption(
+        f"Shows when this symbol was `READY` to buy or sell over the last {lookback_days} days "
+        f"based on recent market bars using `{history_mode}` history rules. All times below are in Melbourne time."
+    )
 
     if timeline.empty:
         st.info(f"Not enough recent bar data to build a {lookback_days}-day readiness history for this symbol.")
@@ -328,11 +346,20 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     st.dataframe(display_audit[audit_cols], use_container_width=True, hide_index=True)
 
 
-def render_recent_ready_assets_section(symbols: List[str], interval: str, include_prepost: bool) -> pd.DataFrame:
+def render_recent_ready_assets_section(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
     lookback_days = READINESS_LOOKBACK_HOURS // 24
-    ready_assets = get_recent_ready_assets(symbols, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
+    ready_assets = get_recent_ready_assets(
+        symbols,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
     st.subheader(f"Assets with ready signals in last {lookback_days} days")
-    st.caption("This helps you find which scanned symbols had at least one `READY` event recently, even if they are not ready right now.")
+    st.caption(
+        f"This helps you find which scanned symbols had at least one `READY` event recently, "
+        f"even if they are not ready right now. The list currently uses `{history_mode}` history rules."
+    )
 
     if interval == "1m":
         st.caption("Note: `1m` history is usually limited by the data provider, so the full one-month window may not be available at that interval.")
@@ -474,6 +501,11 @@ else:
 
 period = st.sidebar.selectbox("Lookback period", ["1d", "5d", "1mo"], index=0)
 interval = st.sidebar.selectbox("Bar interval", ["1m", "2m", "5m", "15m", "30m"], index=2)
+mode_options = list(SCANNER_MODES.keys())
+default_scan_mode_index = mode_options.index(DEFAULT_SCAN_MODE) if DEFAULT_SCAN_MODE in mode_options else 0
+default_history_mode_index = mode_options.index(DEFAULT_HISTORY_MODE) if DEFAULT_HISTORY_MODE in mode_options else 0
+scan_mode = st.sidebar.selectbox("Scanner mode", mode_options, index=default_scan_mode_index)
+history_mode = st.sidebar.selectbox("History mode", mode_options, index=default_history_mode_index)
 include_prepost = st.sidebar.checkbox("Include pre/post market", value=True)
 min_conviction = st.sidebar.slider("Minimum conviction", 0, 100, 45)
 min_relvol = st.sidebar.slider("Minimum relative volume", 0.0, 5.0, 0.5, 0.1)
@@ -492,6 +524,7 @@ test_telegram_ping = st.sidebar.button("Send Telegram test ping", use_container_
 st.title("Pro Intraday Market Scanner")
 st.caption("Ranks symbols for manual intraday decisions using regime, structure, momentum, multi-timeframe alignment, triggers and risk planning.")
 st.caption("All displayed times use Australia/Melbourne.")
+st.caption(f"Live scan mode: `{scan_mode}`. History mode: `{history_mode}`.")
 
 with st.expander("How to use this tool"):
     st.write(
@@ -529,6 +562,7 @@ if run_scan or auto_refresh:
         include_prepost=include_prepost,
         pause_s=scan_pause,
         regime=regime,
+        mode=scan_mode,
     )
     all_results = raw_results.copy()
     results = all_results[all_results.get("qualified", False)].copy() if not all_results.empty else pd.DataFrame()
@@ -759,7 +793,12 @@ if inspect_pool.empty:
         time.sleep(120)
         st.rerun()
     st.stop()
-recent_ready_assets = render_recent_ready_assets_section(inspect_pool["symbol"].tolist(), interval=interval, include_prepost=include_prepost)
+recent_ready_assets = render_recent_ready_assets_section(
+    inspect_pool["symbol"].tolist(),
+    interval=interval,
+    include_prepost=include_prepost,
+    history_mode=history_mode,
+)
 inspect_symbols = inspect_pool["symbol"].tolist()
 default_symbol = recent_ready_assets.iloc[0]["symbol"] if not recent_ready_assets.empty else inspect_symbols[0]
 default_index = inspect_symbols.index(default_symbol) if default_symbol in inspect_symbols else 0
@@ -792,7 +831,7 @@ render_setup_detail(
     },
 )
 render_market_intel(selected)
-render_signal_timing_section(selected_symbol, interval=interval, include_prepost=include_prepost)
+render_signal_timing_section(selected_symbol, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
 
 st.markdown("---")
 st.subheader("Execution ticket")
