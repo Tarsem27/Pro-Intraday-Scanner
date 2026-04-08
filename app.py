@@ -34,6 +34,17 @@ st.set_page_config(page_title="Pro Intraday Scanner", layout="wide")
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 
 RESULT_DEFAULTS = {
+    "status": "unknown",
+    "qualified": False,
+    "signal": "N/A",
+    "conviction": pd.NA,
+    "price": pd.NA,
+    "relvol": pd.NA,
+    "rsi": pd.NA,
+    "spread_proxy_pct": pd.NA,
+    "trigger_ready": False,
+    "trigger_text": "No trigger data",
+    "reasons": "No detailed data",
     "news_sentiment": "UNKNOWN",
     "option_bias": "UNAVAILABLE",
     "event_risk": "UNKNOWN",
@@ -415,6 +426,8 @@ if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = pd.DataFrame()
+if "last_all_scan" not in st.session_state:
+    st.session_state.last_all_scan = pd.DataFrame()
 if "scanned_at" not in st.session_state:
     st.session_state.scanned_at = "Not run"
 if "staged_order" not in st.session_state:
@@ -496,7 +509,8 @@ if run_scan or auto_refresh:
         pause_s=scan_pause,
         regime=regime,
     )
-    results = raw_results.copy()
+    all_results = raw_results.copy()
+    results = all_results[all_results.get("qualified", False)].copy() if not all_results.empty else pd.DataFrame()
     scan_timestamp = pd.Timestamp.now(tz=MELBOURNE_TZ)
     if not results.empty:
         results = results[
@@ -508,6 +522,7 @@ if run_scan or auto_refresh:
         if only_trigger_ready:
             results = results[results["trigger_ready"]].reset_index(drop=True)
     st.session_state.last_scan = results
+    st.session_state.last_all_scan = all_results
     st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
     if telegram_alerts_enabled():
         bot_token = get_telegram_bot_token()
@@ -522,6 +537,13 @@ if run_scan or auto_refresh:
         )
 
 results = st.session_state.last_scan
+all_results = st.session_state.last_all_scan
+if not all_results.empty:
+    all_results = all_results.copy()
+    for column, default_value in RESULT_DEFAULTS.items():
+        if column not in all_results.columns:
+            all_results[column] = default_value
+    st.session_state.last_all_scan = all_results
 if not results.empty:
     results = results.copy()
     for column, default_value in RESULT_DEFAULTS.items():
@@ -552,12 +574,15 @@ with m3:
 with m4:
     render_metric_card("Watchlist", str(len(st.session_state.watchlist)))
 
-if results.empty:
-    st.warning("No setups yet. Either the market is dead, the filters are strict, or the chosen symbols are not moving.")
+if all_results.empty:
+    st.warning("No scan results yet. Either the market is dead, the data provider returned nothing, or the chosen symbols are not moving.")
     if auto_refresh:
         time.sleep(120)
         st.rerun()
     st.stop()
+
+if results.empty:
+    st.warning("No symbols qualified under the current decision rules. You can still inspect blocked symbols below and use the rejection diagnostics to see why they were filtered out.")
 
 st.markdown("---")
 
@@ -632,12 +657,8 @@ if options_filter == "Bullish only":
 elif options_filter == "Bearish only":
     view = view[view["option_bias"] == "BEARISH"].reset_index(drop=True)
 
-if view.empty:
-    st.warning("Your current directional/news/event/options filters removed every setup. Loosen one of the filters and rerun.")
-    if auto_refresh:
-        time.sleep(120)
-        st.rerun()
-    st.stop()
+if view.empty and not results.empty:
+    st.warning("Your current directional/news/event/options filters removed every qualified setup. You can still inspect the scanned symbols below.")
 
 summary_cols = [
     "symbol", "signal", "trigger_ready", "quality_score", "conviction", "price", "change_pct", "relvol", "rsi",
@@ -649,18 +670,35 @@ main_left, main_right = st.columns([1.35, 1])
 
 with main_left:
     st.subheader("Ranked candidates")
-    def row_style(row):
-        signal_bg = '#e8f5e9' if row['signal'] == 'LONG' else '#ffebee'
-        trigger_bg = '#fff8e1' if row['trigger_ready'] else ''
-        return ['background-color: ' + signal_bg if col == 'signal' else ('background-color: ' + trigger_bg if col == 'trigger_ready' else '') for col in row.index]
+    if view.empty:
+        st.info("No qualified rows to rank with the current filters.")
+    else:
+        def row_style(row):
+            signal_bg = '#e8f5e9' if row['signal'] == 'LONG' else '#ffebee'
+            trigger_bg = '#fff8e1' if row['trigger_ready'] else ''
+            return ['background-color: ' + signal_bg if col == 'signal' else ('background-color: ' + trigger_bg if col == 'trigger_ready' else '') for col in row.index]
 
-    styled_view = view[summary_cols].style.apply(row_style, axis=1)
-    st.dataframe(styled_view, use_container_width=True, hide_index=True)
-    render_options_opportunity_board(view)
+        styled_view = view[summary_cols].style.apply(row_style, axis=1)
+        st.dataframe(styled_view, use_container_width=True, hide_index=True)
+        render_options_opportunity_board(view)
+
+    blocked = all_results[all_results["status"] != "ok"].copy() if not all_results.empty else pd.DataFrame()
+    st.subheader("Rejected symbols diagnostics")
+    st.caption("These symbols were scanned but filtered out by the decision engine. This helps explain why you may see zero qualified setups.")
+    if blocked.empty:
+        st.caption("No blocked symbols in the latest scan.")
+    else:
+        blocked["status_reason"] = blocked["status"].str.replace("_", " ").str.title()
+        blocked_cols = [
+            "symbol", "status_reason", "signal", "quality_score", "conviction", "price",
+            "relvol", "rsi", "spread_proxy_pct", "event_risk", "trigger_ready", "trigger_text"
+        ]
+        st.dataframe(blocked[blocked_cols], use_container_width=True, hide_index=True)
 
 with main_right:
     st.subheader("Watchlist")
-    add_symbol = st.selectbox("Add symbol to watchlist", [""] + view["symbol"].tolist())
+    watchlist_source = view["symbol"].tolist() if not view.empty else all_results["symbol"].tolist()
+    add_symbol = st.selectbox("Add symbol to watchlist", [""] + watchlist_source)
     wc1, wc2 = st.columns([1, 1])
     with wc1:
         if st.button("Add to watchlist") and add_symbol:
@@ -677,20 +715,30 @@ with main_right:
             st.caption("No symbols in watchlist yet.")
 
     st.subheader("Top 5 now")
-    for i, row in view.head(5).iterrows():
-        signal_badge = "🟢 LONG" if row["signal"] == "LONG" else "🔴 SHORT"
-        trigger_badge = "⚡ READY" if row["trigger_ready"] else "⏳ WAIT"
-        with st.container(border=True):
-            st.markdown(
-                f"**#{i+1} {row['symbol']}** — {signal_badge} | {trigger_badge}  \
+    if view.empty:
+        st.caption("No qualified setups to rank right now.")
+    else:
+        for i, row in view.head(5).iterrows():
+            signal_badge = "🟢 LONG" if row["signal"] == "LONG" else "🔴 SHORT"
+            trigger_badge = "⚡ READY" if row["trigger_ready"] else "⏳ WAIT"
+            with st.container(border=True):
+                st.markdown(
+                    f"**#{i+1} {row['symbol']}** — {signal_badge} | {trigger_badge}  \
 Quality: **{row['quality_score']}** | Conviction: **{row['conviction']:.1f}** | Move: **{row['change_pct']}%** | RelVol: **{row['relvol']}** | RSI: **{row['rsi']}** | RR1: **{row['rr1']}**"
-            )
-            st.caption(row["reasons"])
+                )
+                st.caption(row["reasons"])
 
 st.markdown("---")
 st.subheader("Setup inspection")
-st.caption("Selected trade setup with cleaner summary cards, chart levels and context.")
-selected_symbol = st.selectbox("Choose symbol", view["symbol"].tolist(), key="detail_symbol")
+st.caption("Selected symbol with chart, trade plan, rejection reason if any, and recent readiness history.")
+inspect_pool = all_results[all_results["chart"].notna()].copy() if "chart" in all_results.columns else all_results.copy()
+if inspect_pool.empty:
+    st.info("No chart-capable symbols are available from the latest scan.")
+    if auto_refresh:
+        time.sleep(120)
+        st.rerun()
+    st.stop()
+selected_symbol = st.selectbox("Choose symbol", inspect_pool["symbol"].tolist(), key="detail_symbol")
 chart_mode = st.radio(
     "Chart type",
     ["Candlestick", "Line + Indicators", "Close Only"],
@@ -703,7 +751,9 @@ show_ema9 = st.checkbox("Show EMA9", value=True, key="show_ema9")
 show_ema20 = st.checkbox("Show EMA20", value=True, key="show_ema20")
 show_sma50 = st.checkbox("Show SMA50", value=True, key="show_sma50")
 recent_bars = st.slider("Recent bars to display", min_value=30, max_value=160, value=80, step=10, key="recent_bars")
-selected = view.loc[view["symbol"] == selected_symbol].iloc[0]
+selected = inspect_pool.loc[inspect_pool["symbol"] == selected_symbol].iloc[0]
+if selected["status"] != "ok":
+    st.warning(f"This symbol was filtered out of qualified setups because of: `{selected['status']}`.")
 render_setup_detail(
     selected,
     chart_mode=chart_mode,
@@ -807,15 +857,15 @@ st.markdown("---")
 st.subheader("Quick backtest")
 backtest_symbols = st.multiselect(
     "Choose symbols to backtest",
-    options=view["symbol"].tolist(),
-    default=view["symbol"].head(3).tolist() if len(view) >= 3 else view["symbol"].tolist(),
+    options=inspect_pool["symbol"].tolist(),
+    default=inspect_pool["symbol"].head(3).tolist() if len(inspect_pool) >= 3 else inspect_pool["symbol"].tolist(),
 )
 if st.button("Run quick backtest"):
     bt_rows = [backtest_symbol(sym, include_prepost=include_prepost) for sym in backtest_symbols]
     bt_df = pd.DataFrame(bt_rows)
     st.dataframe(bt_df, use_container_width=True, hide_index=True)
 
-export_df = view.drop(columns=["chart"], errors="ignore")
+export_df = all_results.drop(columns=["chart"], errors="ignore")
 csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 st.download_button(
     "Download results as CSV",
