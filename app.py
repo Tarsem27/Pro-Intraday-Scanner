@@ -20,6 +20,7 @@ from notifications import (
     telegram_alerts_enabled,
 )
 from scanner import (
+    READINESS_LOOKBACK_HOURS,
     backtest_symbol,
     get_readiness_timeline,
     get_readiness_trade_audit,
@@ -48,6 +49,7 @@ RESULT_DEFAULTS = {
     "call_volume": 0,
     "put_volume": 0,
     "atm_iv": pd.NA,
+    "quality_score": 0,
 }
 
 GLOSSARY_ITEMS = [
@@ -203,13 +205,14 @@ def _format_melbourne_time(value) -> str:
 
 
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool):
-    timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=48)
-    audit_df = get_readiness_trade_audit(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=48)
+    lookback_days = READINESS_LOOKBACK_HOURS // 24
+    timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
+    audit_df = get_readiness_trade_audit(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
     st.subheader("Signal timing")
-    st.caption("Shows when this symbol was `READY` to buy or sell over the last 48 hours based on recent market bars. All times below are in Melbourne time.")
+    st.caption(f"Shows when this symbol was `READY` to buy or sell over the last {lookback_days} days based on recent market bars. All times below are in Melbourne time.")
 
     if timeline.empty:
-        st.info("Not enough recent bar data to build a 48-hour readiness history for this symbol.")
+        st.info(f"Not enough recent bar data to build a {lookback_days}-day readiness history for this symbol.")
         return
 
     summaries = {side: summarize_recent_readiness(timeline, side) for side in ["LONG", "SHORT"]}
@@ -234,7 +237,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
                 f"to {_format_melbourne_time(last_ended)}"
             )
         else:
-            status_text = "No ready signal seen in the last 48h"
+            status_text = f"No ready signal seen in the last {lookback_days}d"
             window_text = "Last ready window: N/A"
 
         with cols[idx]:
@@ -265,7 +268,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     st.caption("Assumption: entry at the ready bar, planned profit uses `Target 1`, planned risk uses `Stop`, and the audit keeps the trade alive until `Target 1`, `Stop`, or the end of the available bar history.")
 
     if audit_df.empty:
-        st.info("No recent ready events with enough follow-through data were found for audit over the last 48 hours.")
+        st.info(f"No recent ready events with enough follow-through data were found for audit over the last {lookback_days} days.")
         return
 
     recent_audit = audit_df.head(10).copy()
@@ -637,7 +640,7 @@ if view.empty:
     st.stop()
 
 summary_cols = [
-    "symbol", "signal", "trigger_ready", "conviction", "price", "change_pct", "relvol", "rsi",
+    "symbol", "signal", "trigger_ready", "quality_score", "conviction", "price", "change_pct", "relvol", "rsi",
     "atr_pct", "spread_proxy_pct", "news_sentiment", "option_bias", "event_risk",
     "liquidity_label", "mtf_state", "entry", "stop", "target1", "rr1", "reasons"
 ]
@@ -680,7 +683,7 @@ with main_right:
         with st.container(border=True):
             st.markdown(
                 f"**#{i+1} {row['symbol']}** — {signal_badge} | {trigger_badge}  \
-Conviction: **{row['conviction']:.1f}** | Move: **{row['change_pct']}%** | RelVol: **{row['relvol']}** | RSI: **{row['rsi']}** | RR1: **{row['rr1']}**"
+Quality: **{row['quality_score']}** | Conviction: **{row['conviction']:.1f}** | Move: **{row['change_pct']}%** | RelVol: **{row['relvol']}** | RSI: **{row['rsi']}** | RR1: **{row['rr1']}**"
             )
             st.caption(row["reasons"])
 
