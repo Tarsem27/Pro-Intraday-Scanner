@@ -10,6 +10,27 @@ import streamlit as st
 import yfinance as yf
 
 
+def _coerce_numeric_series(df: pd.DataFrame, column: str, default: float = np.nan) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(default, index=df.index, dtype="float64")
+
+    data = df[column]
+    if isinstance(data, pd.DataFrame):
+        if data.empty:
+            return pd.Series(default, index=df.index, dtype="float64")
+        data = data.bfill(axis=1).iloc[:, 0]
+
+    return pd.to_numeric(data, errors="coerce")
+
+
+def _normalize_price_frame(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame(index=df.index.copy())
+    for column in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if column in df.columns:
+            out[column] = _coerce_numeric_series(df, column, default=0.0 if column == "Volume" else np.nan)
+    return out
+
+
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
@@ -36,35 +57,45 @@ def macd(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low = df["High"] - df["Low"]
-    high_close = (df["High"] - df["Close"].shift()).abs()
-    low_close = (df["Low"] - df["Close"].shift()).abs()
+    high = _coerce_numeric_series(df, "High")
+    low = _coerce_numeric_series(df, "Low")
+    close = _coerce_numeric_series(df, "Close")
+    high_low = high - low
+    high_close = (high - close.shift()).abs()
+    low_close = (low - close.shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
 
 def add_vwap(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    typical = (out["High"] + out["Low"] + out["Close"]) / 3
-    vol = out["Volume"].fillna(0)
+    out = _normalize_price_frame(df)
+    high = _coerce_numeric_series(out, "High")
+    low = _coerce_numeric_series(out, "Low")
+    close = _coerce_numeric_series(out, "Close")
+    vol = _coerce_numeric_series(out, "Volume", default=0.0).fillna(0)
+    typical = (high + low + close) / 3
     out["VWAP"] = (typical * vol).cumsum() / vol.cumsum().replace(0, np.nan)
     return out
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    out = _normalize_price_frame(df)
     if "Volume" not in out.columns:
         out["Volume"] = 0
     out = add_vwap(out)
-    out["EMA9"] = ema(out["Close"], 9)
-    out["EMA20"] = ema(out["Close"], 20)
-    out["SMA50"] = sma(out["Close"], 50)
-    out["RSI14"] = rsi(out["Close"], 14)
+    close = _coerce_numeric_series(out, "Close")
+    high = _coerce_numeric_series(out, "High")
+    low = _coerce_numeric_series(out, "Low")
+    volume = _coerce_numeric_series(out, "Volume", default=0.0)
+    out["EMA9"] = ema(close, 9)
+    out["EMA20"] = ema(close, 20)
+    out["SMA50"] = sma(close, 50)
+    out["RSI14"] = rsi(close, 14)
     out["ATR14"] = atr(out, 14)
-    out["MACD"], out["MACD_SIGNAL"], out["MACD_HIST"] = macd(out["Close"])
-    out["RollingVol20"] = out["Volume"].rolling(20).mean().replace(0, np.nan)
-    out["RelVol"] = out["Volume"] / out["RollingVol20"]
-    out["SpreadProxyPct"] = (out["High"] - out["Low"]).rolling(3).mean() / out["Close"].replace(0, np.nan) * 100
+    out["MACD"], out["MACD_SIGNAL"], out["MACD_HIST"] = macd(close)
+    out["RollingVol20"] = volume.rolling(20).mean().replace(0, np.nan)
+    out["RelVol"] = volume / out["RollingVol20"]
+    out["SpreadProxyPct"] = (high - low).rolling(3).mean() / close.replace(0, np.nan) * 100
     return out
 
 
@@ -105,7 +136,10 @@ def download_history(symbol: str, period: str, interval: str, include_prepost: b
             df.columns = [c[0] for c in df.columns]
         df = df.rename(columns=str.title)
         keep = [c for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
-        return df[keep].dropna(how="all")
+        if not keep:
+            return pd.DataFrame()
+        cleaned = _normalize_price_frame(df[keep])
+        return cleaned.dropna(how="all")
     except Exception:
         return pd.DataFrame()
 
