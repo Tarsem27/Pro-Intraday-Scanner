@@ -2,7 +2,7 @@
 # file: scanner.py
 # ==============================
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,56 @@ MIN_VWAP_DISTANCE_PCT = 0.15
 MIN_QUALITY_SCORE = 4
 BREAKOUT_BUFFER_PCT = 0.0007
 STOP_BUFFER_PCT = 0.001
+DEFAULT_SCAN_MODE = "Balanced"
+DEFAULT_HISTORY_MODE = "Exploratory"
+SCANNER_MODES = {
+    "Exploratory": {
+        "rsi_neutral_low": 48,
+        "rsi_neutral_high": 52,
+        "min_setup_relvol": 0.6,
+        "min_trigger_relvol": 1.0,
+        "min_vwap_distance_pct": 0.03,
+        "min_quality_score": 2,
+        "breakout_buffer_pct": 0.0003,
+        "close_strength_min": 0.45,
+        "quality_relvol_threshold": 1.0,
+        "quality_vwap_distance_pct": 0.08,
+        "hard_block_choppy": False,
+        "hard_block_high_event": False,
+    },
+    "Balanced": {
+        "rsi_neutral_low": 47,
+        "rsi_neutral_high": 53,
+        "min_setup_relvol": 0.8,
+        "min_trigger_relvol": 1.15,
+        "min_vwap_distance_pct": 0.08,
+        "min_quality_score": 3,
+        "breakout_buffer_pct": 0.0005,
+        "close_strength_min": 0.55,
+        "quality_relvol_threshold": 1.1,
+        "quality_vwap_distance_pct": 0.12,
+        "hard_block_choppy": False,
+        "hard_block_high_event": False,
+    },
+    "Strict": {
+        "rsi_neutral_low": RSI_NEUTRAL_LOW,
+        "rsi_neutral_high": RSI_NEUTRAL_HIGH,
+        "min_setup_relvol": MIN_SETUP_RELVOL,
+        "min_trigger_relvol": MIN_TRIGGER_RELVOL,
+        "min_vwap_distance_pct": MIN_VWAP_DISTANCE_PCT,
+        "min_quality_score": MIN_QUALITY_SCORE,
+        "breakout_buffer_pct": BREAKOUT_BUFFER_PCT,
+        "close_strength_min": 0.6,
+        "quality_relvol_threshold": 1.2,
+        "quality_vwap_distance_pct": 0.2,
+        "hard_block_choppy": True,
+        "hard_block_high_event": True,
+    },
+}
+
+
+def _get_mode_config(mode: Optional[str]) -> Dict:
+    return SCANNER_MODES.get(mode or DEFAULT_SCAN_MODE, SCANNER_MODES[DEFAULT_SCAN_MODE])
 
 
 def support_resistance(df: pd.DataFrame) -> Dict:
@@ -104,10 +154,11 @@ def build_trade_plan(signal: str, price: float, atr_value: float, levels: Dict) 
     }
 
 
-def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict) -> Dict:
+def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict, mode: str = DEFAULT_SCAN_MODE) -> Dict:
     if df.empty or len(df) < 3:
         return {"ready": False, "trigger_text": "insufficient trigger data"}
 
+    mode_config = _get_mode_config(mode)
     last = df.iloc[-1]
     prev = df.iloc[-2]
     relvol = float(last.get("RelVol", 0) or 0)
@@ -119,7 +170,7 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict) -> Dict:
     candle_range = max(high_price - low_price, 1e-6)
     close_strength = (close_price - low_price) / candle_range
     breakdown_strength = (high_price - close_price) / candle_range
-    breakout_buffer = max(close_price * BREAKOUT_BUFFER_PCT, atr_value * 0.1)
+    breakout_buffer = max(close_price * mode_config["breakout_buffer_pct"], atr_value * 0.1)
     prev_high = levels.get("prev_high", np.nan)
     prev_low = levels.get("prev_low", np.nan)
 
@@ -129,9 +180,9 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict) -> Dict:
             last["Close"] > last["VWAP"]
             and close_price >= threshold
             and high_price >= threshold
-            and relvol >= MIN_TRIGGER_RELVOL
+            and relvol >= mode_config["min_trigger_relvol"]
             and close_price > open_price
-            and close_strength >= 0.6
+            and close_strength >= mode_config["close_strength_min"]
         )
         text = f"LONG ready above {threshold:.4f}" if ready else "long not ready"
     else:
@@ -140,9 +191,9 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict) -> Dict:
             last["Close"] < last["VWAP"]
             and close_price <= threshold
             and low_price <= threshold
-            and relvol >= MIN_TRIGGER_RELVOL
+            and relvol >= mode_config["min_trigger_relvol"]
             and close_price < open_price
-            and breakdown_strength >= 0.6
+            and breakdown_strength >= mode_config["close_strength_min"]
         )
         text = f"SHORT ready below {threshold:.4f}" if ready else "short not ready"
 
@@ -161,7 +212,9 @@ def _quality_score(
     spread_proxy: float,
     liquidity_label: str,
     event_risk: str,
+    mode: str = DEFAULT_SCAN_MODE,
 ) -> int:
+    mode_config = _get_mode_config(mode)
     score = 0
     if signal == "LONG":
         score += int(above_vwap)
@@ -171,8 +224,8 @@ def _quality_score(
         score += int(not above_vwap)
         score += int(ema_bear)
         score += int(mtf_state == "BEARISH ALIGNED")
-    score += int(relvol >= 1.2)
-    score += int(pd.notna(vwap_distance_pct) and vwap_distance_pct >= 0.2)
+    score += int(relvol >= mode_config["quality_relvol_threshold"])
+    score += int(pd.notna(vwap_distance_pct) and vwap_distance_pct >= mode_config["quality_vwap_distance_pct"])
     score += int(pd.notna(spread_proxy) and spread_proxy <= 1.2)
     score += int(liquidity_label == "HIGH")
     score -= int(event_risk == "MEDIUM")
@@ -189,11 +242,12 @@ def _history_period_for_interval(interval: str) -> str:
     return "6mo"
 
 
-def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: bool, regime: Dict) -> Dict:
+def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: bool, regime: Dict, mode: str = DEFAULT_SCAN_MODE) -> Dict:
     raw = download_history(symbol, period=period, interval=interval, include_prepost=include_prepost)
     if raw.empty or len(raw) < 50:
         return {"symbol": symbol, "status": "insufficient_data"}
 
+    mode_config = _get_mode_config(mode)
     df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"]))
     if df.empty or len(df) < 50:
         return {"symbol": symbol, "status": "insufficient_data"}
@@ -224,15 +278,15 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     mtf = mtf_confirmation(symbol, include_prepost=include_prepost)
     intel = get_symbol_intel(symbol, df=df, price_hint=price)
     blocked_status = None
-    if regime["overall"] == "CHOPPY":
+    if mode_config["hard_block_choppy"] and regime["overall"] == "CHOPPY":
         blocked_status = "regime_blocked"
-    elif intel["event_risk"] == "HIGH":
+    elif mode_config["hard_block_high_event"] and intel["event_risk"] == "HIGH":
         blocked_status = "event_blocked"
-    elif relvol < MIN_SETUP_RELVOL:
+    elif relvol < mode_config["min_setup_relvol"]:
         blocked_status = "low_volume"
-    elif pd.notna(rsi_now) and RSI_NEUTRAL_LOW < rsi_now < RSI_NEUTRAL_HIGH:
+    elif pd.notna(rsi_now) and mode_config["rsi_neutral_low"] < rsi_now < mode_config["rsi_neutral_high"]:
         blocked_status = "neutral_rsi"
-    elif pd.notna(vwap_distance_pct) and vwap_distance_pct < MIN_VWAP_DISTANCE_PCT:
+    elif pd.notna(vwap_distance_pct) and vwap_distance_pct < mode_config["min_vwap_distance_pct"]:
         blocked_status = "vwap_indecision"
 
     long_score = 0.0
@@ -322,10 +376,11 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         spread_proxy=spread_proxy,
         liquidity_label=intel["liquidity_label"],
         event_risk=intel["event_risk"],
+        mode=mode,
     )
-    if blocked_status is None and quality_score < MIN_QUALITY_SCORE:
+    if blocked_status is None and quality_score < mode_config["min_quality_score"]:
         blocked_status = "low_quality"
-    trigger = entry_trigger(signal, df, levels)
+    trigger = entry_trigger(signal, df, levels, mode=mode)
     plan = build_trade_plan(signal, price, atr_value, levels)
 
     reasons = []
@@ -373,6 +428,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
 
     return {
         "symbol": symbol,
+        "mode": mode,
         "status": "ok" if blocked_status is None else blocked_status,
         "qualified": blocked_status is None,
         "price": round(price, 4),
@@ -434,12 +490,20 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     }
 
 
-def scan_symbols(symbols: List[str], period: str, interval: str, include_prepost: bool, pause_s: float, regime: Dict) -> pd.DataFrame:
+def scan_symbols(
+    symbols: List[str],
+    period: str,
+    interval: str,
+    include_prepost: bool,
+    pause_s: float,
+    regime: Dict,
+    mode: str = DEFAULT_SCAN_MODE,
+) -> pd.DataFrame:
     rows = []
     progress = st.progress(0, text="Scanning symbols...")
     total = max(len(symbols), 1)
     for idx, symbol in enumerate(symbols, start=1):
-        result = analyze_symbol(symbol, period, interval, include_prepost, regime)
+        result = analyze_symbol(symbol, period, interval, include_prepost, regime, mode=mode)
         if result.get("symbol"):
             rows.append(result)
         progress.progress(idx / total, text=f"Scanning {idx}/{total}: {symbol}")
@@ -517,7 +581,13 @@ def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+def get_readiness_timeline(
+    symbol: str,
+    interval: str,
+    include_prepost: bool,
+    lookback_hours: int = READINESS_LOOKBACK_HOURS,
+    mode: str = DEFAULT_HISTORY_MODE,
+) -> pd.DataFrame:
     history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
     if raw.empty or len(raw) < 35:
@@ -532,8 +602,8 @@ def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lo
     for i in range(30, len(df)):
         window = df.iloc[: i + 1]
         levels = support_resistance(window)
-        long_trigger = entry_trigger("LONG", window, levels)
-        short_trigger = entry_trigger("SHORT", window, levels)
+        long_trigger = entry_trigger("LONG", window, levels, mode=mode)
+        short_trigger = entry_trigger("SHORT", window, levels, mode=mode)
         rows.append(
             {
                 "timestamp": pd.Timestamp(window.index[-1]),
@@ -616,10 +686,22 @@ def summarize_recent_readiness(timeline: pd.DataFrame, side: str) -> Dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_recent_ready_assets(symbols: List[str], interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+def get_recent_ready_assets(
+    symbols: List[str],
+    interval: str,
+    include_prepost: bool,
+    lookback_hours: int = READINESS_LOOKBACK_HOURS,
+    mode: str = DEFAULT_HISTORY_MODE,
+) -> pd.DataFrame:
     rows = []
     for symbol in symbols:
-        timeline = get_readiness_timeline(symbol, interval=interval, include_prepost=include_prepost, lookback_hours=lookback_hours)
+        timeline = get_readiness_timeline(
+            symbol,
+            interval=interval,
+            include_prepost=include_prepost,
+            lookback_hours=lookback_hours,
+            mode=mode,
+        )
         if timeline.empty:
             continue
 
@@ -732,7 +814,13 @@ def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+def get_readiness_trade_audit(
+    symbol: str,
+    interval: str,
+    include_prepost: bool,
+    lookback_hours: int = READINESS_LOOKBACK_HOURS,
+    mode: str = DEFAULT_HISTORY_MODE,
+) -> pd.DataFrame:
     history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
     if raw.empty or len(raw) < 35:
@@ -752,8 +840,8 @@ def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool,
         last = window.iloc[-1]
         price = float(last["Close"])
         atr_value = float(last["ATR14"]) if pd.notna(last["ATR14"]) else np.nan
-        long_trigger = entry_trigger("LONG", window, levels)
-        short_trigger = entry_trigger("SHORT", window, levels)
+        long_trigger = entry_trigger("LONG", window, levels, mode=mode)
+        short_trigger = entry_trigger("SHORT", window, levels, mode=mode)
         long_plan = build_trade_plan("LONG", price, atr_value, levels)
         short_plan = build_trade_plan("SHORT", price, atr_value, levels)
         rows.append(
