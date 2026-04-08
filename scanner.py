@@ -221,17 +221,17 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     levels = support_resistance(df)
     mtf = mtf_confirmation(symbol, include_prepost=include_prepost)
     intel = get_symbol_intel(symbol, df=df, price_hint=price)
-
+    blocked_status = None
     if regime["overall"] == "CHOPPY":
-        return {"symbol": symbol, "status": "regime_blocked"}
-    if intel["event_risk"] == "HIGH":
-        return {"symbol": symbol, "status": "event_blocked"}
-    if relvol < MIN_SETUP_RELVOL:
-        return {"symbol": symbol, "status": "low_volume"}
-    if pd.notna(rsi_now) and RSI_NEUTRAL_LOW < rsi_now < RSI_NEUTRAL_HIGH:
-        return {"symbol": symbol, "status": "neutral_rsi"}
-    if pd.notna(vwap_distance_pct) and vwap_distance_pct < MIN_VWAP_DISTANCE_PCT:
-        return {"symbol": symbol, "status": "vwap_indecision"}
+        blocked_status = "regime_blocked"
+    elif intel["event_risk"] == "HIGH":
+        blocked_status = "event_blocked"
+    elif relvol < MIN_SETUP_RELVOL:
+        blocked_status = "low_volume"
+    elif pd.notna(rsi_now) and RSI_NEUTRAL_LOW < rsi_now < RSI_NEUTRAL_HIGH:
+        blocked_status = "neutral_rsi"
+    elif pd.notna(vwap_distance_pct) and vwap_distance_pct < MIN_VWAP_DISTANCE_PCT:
+        blocked_status = "vwap_indecision"
 
     long_score = 0.0
     short_score = 0.0
@@ -321,8 +321,8 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         liquidity_label=intel["liquidity_label"],
         event_risk=intel["event_risk"],
     )
-    if quality_score < MIN_QUALITY_SCORE:
-        return {"symbol": symbol, "status": "low_quality"}
+    if blocked_status is None and quality_score < MIN_QUALITY_SCORE:
+        blocked_status = "low_quality"
     trigger = entry_trigger(signal, df, levels)
     plan = build_trade_plan(signal, price, atr_value, levels)
 
@@ -366,10 +366,13 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         reasons.append(f"options flow {intel['option_bias'].lower()}")
     if intel["event_risk"] in {"HIGH", "MEDIUM"}:
         reasons.append(intel["event_summary"])
+    if blocked_status:
+        reasons.append(f"blocked: {blocked_status.replace('_', ' ')}")
 
     return {
         "symbol": symbol,
-        "status": "ok",
+        "status": "ok" if blocked_status is None else blocked_status,
+        "qualified": blocked_status is None,
         "price": round(price, 4),
         "change_pct": round(change_pct, 2) if pd.notna(change_pct) else np.nan,
         "volume": int(latest["Volume"]) if pd.notna(latest["Volume"]) else 0,
@@ -435,7 +438,7 @@ def scan_symbols(symbols: List[str], period: str, interval: str, include_prepost
     total = max(len(symbols), 1)
     for idx, symbol in enumerate(symbols, start=1):
         result = analyze_symbol(symbol, period, interval, include_prepost, regime)
-        if result.get("status") == "ok":
+        if result.get("symbol"):
             rows.append(result)
         progress.progress(idx / total, text=f"Scanning {idx}/{total}: {symbol}")
         if pause_s > 0:
@@ -443,7 +446,13 @@ def scan_symbols(symbols: List[str], period: str, interval: str, include_prepost
     progress.empty()
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["trigger_ready", "quality_score", "conviction", "relvol", "atr_pct"], ascending=[False, False, False, False, False]).reset_index(drop=True)
+    frame = pd.DataFrame(rows)
+    if "qualified" not in frame.columns:
+        frame["qualified"] = frame["status"].eq("ok")
+    return frame.sort_values(
+        ["qualified", "trigger_ready", "quality_score", "conviction", "relvol", "atr_pct"],
+        ascending=[False, False, False, False, False, False],
+    ).reset_index(drop=True)
 
 
 def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
