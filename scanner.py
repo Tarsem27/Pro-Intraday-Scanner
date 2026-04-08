@@ -429,6 +429,8 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     return {
         "symbol": symbol,
         "mode": mode,
+        "scanner_status": "ok" if blocked_status is None else blocked_status,
+        "scanner_qualified": blocked_status is None,
         "status": "ok" if blocked_status is None else blocked_status,
         "qualified": blocked_status is None,
         "price": round(price, 4),
@@ -439,6 +441,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         "atr": round(atr_value, 4) if pd.notna(atr_value) else np.nan,
         "atr_pct": round(atr_pct, 2) if pd.notna(atr_pct) else np.nan,
         "spread_proxy_pct": round(spread_proxy, 2) if pd.notna(spread_proxy) else np.nan,
+        "vwap_distance_pct": round(vwap_distance_pct, 3) if pd.notna(vwap_distance_pct) else np.nan,
         "vwap": round(float(latest["VWAP"]), 4) if pd.notna(latest["VWAP"]) else np.nan,
         "session_high": round(session_high, 4),
         "session_low": round(session_low, 4),
