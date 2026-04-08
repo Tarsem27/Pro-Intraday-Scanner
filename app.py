@@ -22,6 +22,7 @@ from notifications import (
 from scanner import (
     READINESS_LOOKBACK_HOURS,
     backtest_symbol,
+    get_recent_ready_assets,
     get_readiness_timeline,
     get_readiness_trade_audit,
     scan_symbols,
@@ -324,6 +325,25 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         "window_duration",
     ]
     st.dataframe(display_audit[audit_cols], use_container_width=True, hide_index=True)
+
+
+def render_recent_ready_assets_section(symbols: list[str], interval: str, include_prepost: bool) -> pd.DataFrame:
+    lookback_days = READINESS_LOOKBACK_HOURS // 24
+    ready_assets = get_recent_ready_assets(symbols, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
+    st.subheader(f"Assets with ready signals in last {lookback_days} days")
+    st.caption("This helps you find which scanned symbols had at least one `READY` event recently, even if they are not ready right now.")
+
+    if interval == "1m":
+        st.caption("Note: `1m` history is usually limited by the data provider, so the full one-month window may not be available at that interval.")
+
+    if ready_assets.empty:
+        st.info(f"No scanned symbols showed a recorded `READY` event in the last {lookback_days} days at the current interval.")
+        return ready_assets
+
+    display = ready_assets.copy()
+    display["last_ready_at"] = display["last_ready_at"].apply(_format_melbourne_time)
+    st.dataframe(display, use_container_width=True, hide_index=True)
+    return ready_assets
 
 
 def render_options_opportunity_board(view: pd.DataFrame):
@@ -738,7 +758,11 @@ if inspect_pool.empty:
         time.sleep(120)
         st.rerun()
     st.stop()
-selected_symbol = st.selectbox("Choose symbol", inspect_pool["symbol"].tolist(), key="detail_symbol")
+recent_ready_assets = render_recent_ready_assets_section(inspect_pool["symbol"].tolist(), interval=interval, include_prepost=include_prepost)
+inspect_symbols = inspect_pool["symbol"].tolist()
+default_symbol = recent_ready_assets.iloc[0]["symbol"] if not recent_ready_assets.empty else inspect_symbols[0]
+default_index = inspect_symbols.index(default_symbol) if default_symbol in inspect_symbols else 0
+selected_symbol = st.selectbox("Choose symbol", inspect_symbols, index=default_index, key="detail_symbol")
 chart_mode = st.radio(
     "Chart type",
     ["Candlestick", "Line + Indicators", "Close Only"],
