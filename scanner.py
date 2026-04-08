@@ -500,6 +500,7 @@ def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float
     if future_df.empty:
         return {
             "exit_price": entry,
+            "exit_timestamp": None,
             "actual_pnl": 0.0,
             "actual_pnl_pct": 0.0,
             "actual_r": 0.0,
@@ -508,25 +509,30 @@ def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float
 
     risk = max(abs(entry - stop), 1e-6)
     exit_price = float(future_df["Close"].iloc[-1])
-    outcome_status = "window_exit"
+    exit_timestamp = pd.Timestamp(future_df.index[-1])
+    outcome_status = "data_end_exit"
 
-    for _, row in future_df.iterrows():
+    for idx, row in future_df.iterrows():
         high = float(row["High"])
         low = float(row["Low"])
+        bar_ts = pd.Timestamp(idx)
 
         if signal == "LONG":
             stop_hit = low <= stop
             target_hit = high >= target1
             if stop_hit and target_hit:
                 exit_price = stop
+                exit_timestamp = bar_ts
                 outcome_status = "stop_hit_same_bar"
                 break
             if stop_hit:
                 exit_price = stop
+                exit_timestamp = bar_ts
                 outcome_status = "stop_hit"
                 break
             if target_hit:
                 exit_price = target1
+                exit_timestamp = bar_ts
                 outcome_status = "target1_hit"
                 break
         else:
@@ -534,20 +540,24 @@ def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float
             target_hit = low <= target1
             if stop_hit and target_hit:
                 exit_price = stop
+                exit_timestamp = bar_ts
                 outcome_status = "stop_hit_same_bar"
                 break
             if stop_hit:
                 exit_price = stop
+                exit_timestamp = bar_ts
                 outcome_status = "stop_hit"
                 break
             if target_hit:
                 exit_price = target1
+                exit_timestamp = bar_ts
                 outcome_status = "target1_hit"
                 break
 
     actual_pnl = exit_price - entry if signal == "LONG" else entry - exit_price
     return {
         "exit_price": round(exit_price, 4),
+        "exit_timestamp": exit_timestamp,
         "actual_pnl": round(actual_pnl, 4),
         "actual_pnl_pct": round(actual_pnl / entry * 100, 2) if entry else np.nan,
         "actual_r": round(actual_pnl / risk, 2) if risk else np.nan,
@@ -620,7 +630,7 @@ def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool,
                 start_ts = pd.Timestamp(start_row["timestamp"])
                 end_ts = pd.Timestamp(end_row["timestamp"])
                 if end_ts >= cutoff:
-                    future_df = df[(df.index > start_ts) & (df.index <= end_ts)]
+                    future_df = df[df.index > start_ts]
                     entry = float(start_row[entry_col])
                     stop = float(start_row[stop_col])
                     target1 = float(start_row[target_col])
@@ -629,7 +639,8 @@ def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool,
                         {
                             "side": side,
                             "started": start_ts,
-                            "ended": end_ts,
+                            "ended": evaluation["exit_timestamp"],
+                            "readiness_ended": end_ts,
                             "window_duration": end_ts - start_ts,
                             "entry": round(entry, 4),
                             "stop": round(stop, 4),
@@ -658,7 +669,8 @@ def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool,
                     {
                         "side": side,
                         "started": start_ts,
-                        "ended": None,
+                        "ended": evaluation["exit_timestamp"],
+                        "readiness_ended": last_ts,
                         "window_duration": last_ts - start_ts,
                         "entry": round(entry, 4),
                         "stop": round(stop, 4),
