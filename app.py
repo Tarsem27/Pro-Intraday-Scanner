@@ -225,6 +225,94 @@ def _format_melbourne_time(value) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def _history_interval_candidates(interval: str) -> List[str]:
+    fallback_map = {
+        "1m": ["1m", "5m", "15m", "30m"],
+        "2m": ["2m", "5m", "15m", "30m"],
+        "5m": ["5m", "15m", "30m"],
+        "15m": ["15m", "30m", "5m"],
+        "30m": ["30m", "15m", "5m"],
+    }
+    return fallback_map.get(interval, [interval, "15m", "30m"])
+
+
+def _history_mode_candidates(history_mode: str) -> List[str]:
+    ordered = [history_mode, "Balanced", "Exploratory", "Strict"]
+    seen = set()
+    return [mode for mode in ordered if not (mode in seen or seen.add(mode))]
+
+
+def _resolve_signal_timing_data(symbol: str, interval: str, include_prepost: bool, history_mode: str):
+    attempted = []
+    for candidate_interval in _history_interval_candidates(interval):
+        for candidate_mode in _history_mode_candidates(history_mode):
+            timeline = get_readiness_timeline(
+                symbol,
+                interval=candidate_interval,
+                include_prepost=include_prepost,
+                lookback_hours=READINESS_LOOKBACK_HOURS,
+                mode=candidate_mode,
+            )
+            attempted.append(f"{candidate_interval}/{candidate_mode}")
+            if timeline.empty:
+                continue
+            audit_df = get_readiness_trade_audit(
+                symbol,
+                interval=candidate_interval,
+                include_prepost=include_prepost,
+                lookback_hours=READINESS_LOOKBACK_HOURS,
+                mode=candidate_mode,
+            )
+            return {
+                "timeline": timeline,
+                "audit_df": audit_df,
+                "used_interval": candidate_interval,
+                "used_mode": candidate_mode,
+                "fallback_used": candidate_interval != interval or candidate_mode != history_mode,
+                "attempted": attempted,
+            }
+
+    return {
+        "timeline": pd.DataFrame(),
+        "audit_df": pd.DataFrame(),
+        "used_interval": interval,
+        "used_mode": history_mode,
+        "fallback_used": False,
+        "attempted": attempted,
+    }
+
+
+def _resolve_recent_ready_assets(symbols: List[str], interval: str, include_prepost: bool, history_mode: str):
+    attempted = []
+    for candidate_interval in _history_interval_candidates(interval):
+        for candidate_mode in _history_mode_candidates(history_mode):
+            ready_assets = get_recent_ready_assets(
+                symbols,
+                interval=candidate_interval,
+                include_prepost=include_prepost,
+                lookback_hours=READINESS_LOOKBACK_HOURS,
+                mode=candidate_mode,
+            )
+            attempted.append(f"{candidate_interval}/{candidate_mode}")
+            if ready_assets.empty:
+                continue
+            return {
+                "ready_assets": ready_assets,
+                "used_interval": candidate_interval,
+                "used_mode": candidate_mode,
+                "fallback_used": candidate_interval != interval or candidate_mode != history_mode,
+                "attempted": attempted,
+            }
+
+    return {
+        "ready_assets": pd.DataFrame(),
+        "used_interval": interval,
+        "used_mode": history_mode,
+        "fallback_used": False,
+        "attempted": attempted,
+    }
+
+
 def apply_acceptance_criteria(
     all_results: pd.DataFrame,
     *,
@@ -466,25 +554,20 @@ def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, i
 
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool, history_mode: str):
     lookback_days = READINESS_LOOKBACK_HOURS // 24
-    timeline = get_readiness_timeline(
-        symbol,
-        interval=interval,
-        include_prepost=include_prepost,
-        lookback_hours=READINESS_LOOKBACK_HOURS,
-        mode=history_mode,
-    )
-    audit_df = get_readiness_trade_audit(
-        symbol,
-        interval=interval,
-        include_prepost=include_prepost,
-        lookback_hours=READINESS_LOOKBACK_HOURS,
-        mode=history_mode,
-    )
+    resolved = _resolve_signal_timing_data(symbol, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
+    timeline = resolved["timeline"]
+    audit_df = resolved["audit_df"]
     st.subheader("Signal timing")
     st.caption(
         f"Shows when this symbol was `READY` to buy or sell over the last {lookback_days} days "
         f"based on recent market bars using `{history_mode}` history rules. All times below are in Melbourne time."
     )
+
+    if resolved["fallback_used"]:
+        st.caption(
+            f"Auto-fallback used `interval={resolved['used_interval']}` and `history mode={resolved['used_mode']}` "
+            f"because the requested history did not have enough usable data."
+        )
 
     if timeline.empty:
         st.info(f"Not enough recent bar data to build a {lookback_days}-day readiness history for this symbol.")
@@ -592,18 +675,19 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
 
 def render_recent_ready_assets_section(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
     lookback_days = READINESS_LOOKBACK_HOURS // 24
-    ready_assets = get_recent_ready_assets(
-        symbols,
-        interval=interval,
-        include_prepost=include_prepost,
-        lookback_hours=READINESS_LOOKBACK_HOURS,
-        mode=history_mode,
-    )
+    resolved = _resolve_recent_ready_assets(symbols, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
+    ready_assets = resolved["ready_assets"]
     st.subheader(f"Assets with ready signals in last {lookback_days} days")
     st.caption(
         f"This helps you find which scanned symbols had at least one `READY` event recently, "
         f"even if they are not ready right now. The list currently uses `{history_mode}` history rules."
     )
+
+    if resolved["fallback_used"]:
+        st.caption(
+            f"Auto-fallback used `interval={resolved['used_interval']}` and `history mode={resolved['used_mode']}` "
+            f"to find usable recent-ready history."
+        )
 
     if interval == "1m":
         st.caption("Note: `1m` history is usually limited by the data provider, so the full one-month window may not be available at that interval.")
