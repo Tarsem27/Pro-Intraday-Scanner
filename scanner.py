@@ -12,6 +12,17 @@ from data_utils import add_indicators, download_history, normalize_score
 from market_intel import get_symbol_intel
 
 
+READINESS_LOOKBACK_HOURS = 24 * 10
+RSI_NEUTRAL_LOW = 45
+RSI_NEUTRAL_HIGH = 55
+MIN_SETUP_RELVOL = 0.9
+MIN_TRIGGER_RELVOL = 1.3
+MIN_VWAP_DISTANCE_PCT = 0.15
+MIN_QUALITY_SCORE = 4
+BREAKOUT_BUFFER_PCT = 0.0007
+STOP_BUFFER_PCT = 0.001
+
+
 def support_resistance(df: pd.DataFrame) -> Dict:
     recent = df.tail(30)
     if recent.empty:
@@ -60,16 +71,23 @@ def build_trade_plan(signal: str, price: float, atr_value: float, levels: Dict) 
     atr_value = 0 if pd.isna(atr_value) else float(atr_value)
     support = levels.get("support", np.nan)
     resistance = levels.get("resistance", np.nan)
+    structure_buffer = max(price * STOP_BUFFER_PCT, atr_value * 0.15)
 
     if signal == "LONG":
         entry = price
-        stop = max(price - atr_value, support) if pd.notna(support) else price - atr_value
+        if pd.notna(support) and support < entry:
+            stop = support - structure_buffer
+        else:
+            stop = price - max(atr_value, structure_buffer)
         risk = max(entry - stop, 1e-6)
         target1 = entry + 2 * risk
         target2 = resistance if pd.notna(resistance) and resistance > entry else entry + 3 * risk
     else:
         entry = price
-        stop = min(price + atr_value, resistance) if pd.notna(resistance) else price + atr_value
+        if pd.notna(resistance) and resistance > entry:
+            stop = resistance + structure_buffer
+        else:
+            stop = price + max(atr_value, structure_buffer)
         risk = max(stop - entry, 1e-6)
         target1 = entry - 2 * risk
         target2 = support if pd.notna(support) and support < entry else entry - 3 * risk
@@ -93,19 +111,80 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict) -> Dict:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     relvol = float(last.get("RelVol", 0) or 0)
-    resistance = levels.get("resistance", np.nan)
-    support = levels.get("support", np.nan)
+    close_price = float(last["Close"])
+    open_price = float(last["Open"])
+    high_price = float(last["High"])
+    low_price = float(last["Low"])
+    atr_value = float(last["ATR14"]) if pd.notna(last.get("ATR14")) else 0.0
+    candle_range = max(high_price - low_price, 1e-6)
+    close_strength = (close_price - low_price) / candle_range
+    breakdown_strength = (high_price - close_price) / candle_range
+    breakout_buffer = max(close_price * BREAKOUT_BUFFER_PCT, atr_value * 0.1)
+    prev_high = levels.get("prev_high", np.nan)
+    prev_low = levels.get("prev_low", np.nan)
 
     if signal == "LONG":
-        threshold = max(prev["High"], resistance * 0.998 if pd.notna(resistance) else prev["High"])
-        ready = bool(last["Close"] > last["VWAP"] and last["Close"] >= threshold and relvol >= 1.0)
+        threshold = max(float(prev["High"]), float(prev_high) if pd.notna(prev_high) else float(prev["High"])) + breakout_buffer
+        ready = bool(
+            last["Close"] > last["VWAP"]
+            and close_price >= threshold
+            and high_price >= threshold
+            and relvol >= MIN_TRIGGER_RELVOL
+            and close_price > open_price
+            and close_strength >= 0.6
+        )
         text = f"LONG ready above {threshold:.4f}" if ready else "long not ready"
     else:
-        threshold = min(prev["Low"], support * 1.002 if pd.notna(support) else prev["Low"])
-        ready = bool(last["Close"] < last["VWAP"] and last["Close"] <= threshold and relvol >= 1.0)
+        threshold = min(float(prev["Low"]), float(prev_low) if pd.notna(prev_low) else float(prev["Low"])) - breakout_buffer
+        ready = bool(
+            last["Close"] < last["VWAP"]
+            and close_price <= threshold
+            and low_price <= threshold
+            and relvol >= MIN_TRIGGER_RELVOL
+            and close_price < open_price
+            and breakdown_strength >= 0.6
+        )
         text = f"SHORT ready below {threshold:.4f}" if ready else "short not ready"
 
     return {"ready": ready, "trigger_text": text}
+
+
+def _quality_score(
+    signal: str,
+    *,
+    above_vwap: bool,
+    ema_bull: bool,
+    ema_bear: bool,
+    mtf_state: str,
+    relvol: float,
+    vwap_distance_pct: float,
+    spread_proxy: float,
+    liquidity_label: str,
+    event_risk: str,
+) -> int:
+    score = 0
+    if signal == "LONG":
+        score += int(above_vwap)
+        score += int(ema_bull)
+        score += int(mtf_state == "BULLISH ALIGNED")
+    else:
+        score += int(not above_vwap)
+        score += int(ema_bear)
+        score += int(mtf_state == "BEARISH ALIGNED")
+    score += int(relvol >= 1.2)
+    score += int(pd.notna(vwap_distance_pct) and vwap_distance_pct >= 0.2)
+    score += int(pd.notna(spread_proxy) and spread_proxy <= 1.2)
+    score += int(liquidity_label == "HIGH")
+    score -= int(event_risk == "MEDIUM")
+    return max(score, 0)
+
+
+def _history_period_for_interval(interval: str) -> str:
+    if interval == "1m":
+        return "7d"
+    if interval in {"2m", "5m", "15m", "30m", "60m"}:
+        return "1mo"
+    return "3mo"
 
 
 def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: bool, regime: Dict) -> Dict:
@@ -129,6 +208,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     atr_value = float(latest["ATR14"]) if pd.notna(latest["ATR14"]) else np.nan
     atr_pct = (atr_value / price * 100) if price else np.nan
     above_vwap = bool(price > float(latest["VWAP"])) if pd.notna(latest["VWAP"]) else False
+    vwap_distance_pct = abs(price - float(latest["VWAP"])) / price * 100 if price and pd.notna(latest["VWAP"]) else np.nan
     ema_bull = bool(latest["EMA9"] > latest["EMA20"] > latest["SMA50"]) if pd.notna(latest["SMA50"]) else False
     ema_bear = bool(latest["EMA9"] < latest["EMA20"] < latest["SMA50"]) if pd.notna(latest["SMA50"]) else False
     macd_up = bool(latest["MACD_HIST"] > prev["MACD_HIST"] and latest["MACD_HIST"] > 0) if pd.notna(latest["MACD_HIST"]) and pd.notna(prev["MACD_HIST"]) else False
@@ -141,6 +221,17 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     levels = support_resistance(df)
     mtf = mtf_confirmation(symbol, include_prepost=include_prepost)
     intel = get_symbol_intel(symbol, df=df, price_hint=price)
+
+    if regime["overall"] == "CHOPPY":
+        return {"symbol": symbol, "status": "regime_blocked"}
+    if intel["event_risk"] == "HIGH":
+        return {"symbol": symbol, "status": "event_blocked"}
+    if relvol < MIN_SETUP_RELVOL:
+        return {"symbol": symbol, "status": "low_volume"}
+    if pd.notna(rsi_now) and RSI_NEUTRAL_LOW < rsi_now < RSI_NEUTRAL_HIGH:
+        return {"symbol": symbol, "status": "neutral_rsi"}
+    if pd.notna(vwap_distance_pct) and vwap_distance_pct < MIN_VWAP_DISTANCE_PCT:
+        return {"symbol": symbol, "status": "vwap_indecision"}
 
     long_score = 0.0
     short_score = 0.0
@@ -218,6 +309,20 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     short_score = max(0.0, min(100.0, round(short_score, 2)))
     signal = "LONG" if long_score >= short_score else "SHORT"
     conviction = max(long_score, short_score)
+    quality_score = _quality_score(
+        signal,
+        above_vwap=above_vwap,
+        ema_bull=ema_bull,
+        ema_bear=ema_bear,
+        mtf_state=mtf["state"],
+        relvol=relvol,
+        vwap_distance_pct=vwap_distance_pct,
+        spread_proxy=spread_proxy,
+        liquidity_label=intel["liquidity_label"],
+        event_risk=intel["event_risk"],
+    )
+    if quality_score < MIN_QUALITY_SCORE:
+        return {"symbol": symbol, "status": "low_quality"}
     trigger = entry_trigger(signal, df, levels)
     plan = build_trade_plan(signal, price, atr_value, levels)
 
@@ -249,6 +354,8 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         reasons.append(f"rel vol {relvol:.2f}x")
     if pd.notna(rsi_now):
         reasons.append(f"RSI {rsi_now:.1f}")
+    if pd.notna(vwap_distance_pct):
+        reasons.append(f"VWAP gap {vwap_distance_pct:.2f}%")
     if pd.notna(spread_proxy) and spread_proxy <= 1.8:
         reasons.append(f"tradability ok ({spread_proxy:.2f}% proxy)")
     elif pd.notna(spread_proxy):
@@ -282,6 +389,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         "dist_low_pct": round(dist_low_pct, 2) if pd.notna(dist_low_pct) else np.nan,
         "long_score": long_score,
         "short_score": short_score,
+        "quality_score": quality_score,
         "signal": signal,
         "conviction": conviction,
         "mtf_state": mtf["state"],
@@ -335,7 +443,7 @@ def scan_symbols(symbols: List[str], period: str, interval: str, include_prepost
     progress.empty()
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["trigger_ready", "conviction", "relvol", "atr_pct"], ascending=[False, False, False, False]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["trigger_ready", "quality_score", "conviction", "relvol", "atr_pct"], ascending=[False, False, False, False, False]).reset_index(drop=True)
 
 
 def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
@@ -398,8 +506,8 @@ def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = 48) -> pd.DataFrame:
-    history_period = "5d" if interval in {"1m", "2m", "5m", "15m", "30m"} else "1mo"
+def get_readiness_timeline(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+    history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
     if raw.empty or len(raw) < 35:
         return pd.DataFrame()
@@ -566,8 +674,8 @@ def _evaluate_readiness_trade(signal: str, future_df: pd.DataFrame, entry: float
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = 48) -> pd.DataFrame:
-    history_period = "5d" if interval in {"1m", "2m", "5m", "15m", "30m"} else "1mo"
+def get_readiness_trade_audit(symbol: str, interval: str, include_prepost: bool, lookback_hours: int = READINESS_LOOKBACK_HOURS) -> pd.DataFrame:
+    history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
     if raw.empty or len(raw) < 35:
         return pd.DataFrame()
