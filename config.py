@@ -28,5 +28,14 @@ DEFAULT_UNIVERSES: Dict[str, List[str]] = {
     "Crypto": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "BNB-USD"],
 }
 
+DEFAULT_UNIVERSES["ALL"] = list(
+    dict.fromkeys(
+        symbol
+        for universe_name, universe_symbols in DEFAULT_UNIVERSES.items()
+        if universe_name != "ALL"
+        for symbol in universe_symbols
+    )
+)
+
 DEFAULT_CUSTOM_SYMBOLS = "TSLA,NVDA,AMD,PLTR,SMCI,COIN,MSTR,RIVN,SOFI,AFRM,RIOT,MARA,IONQ,RKLB,SIRI,PLUG,OPEN,SPY,QQQ,IWM,BTC-USD,ETH-USD"
 
