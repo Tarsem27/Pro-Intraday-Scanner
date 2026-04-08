@@ -262,7 +262,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         st.dataframe(event_df, use_container_width=True, hide_index=True)
 
     st.markdown("**Recent signal audit**")
-    st.caption("Assumption: entry at the ready bar, planned profit uses `Target 1`, planned risk uses `Stop`, and actual result exits at target, stop, or when the readiness window ends.")
+    st.caption("Assumption: entry at the ready bar, planned profit uses `Target 1`, planned risk uses `Stop`, and the audit keeps the trade alive until `Target 1`, `Stop`, or the end of the available bar history.")
 
     if audit_df.empty:
         st.info("No recent ready events with enough follow-through data were found for audit over the last 48 hours.")
@@ -288,8 +288,11 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     display_audit = recent_audit.copy()
     display_audit["started"] = display_audit["started"].apply(_format_melbourne_time)
     display_audit["ended"] = display_audit["ended"].apply(_format_melbourne_time)
+    if "readiness_ended" in display_audit.columns:
+        display_audit["readiness_ended"] = display_audit["readiness_ended"].apply(_format_melbourne_time)
     display_audit["window_duration"] = display_audit["window_duration"].apply(_format_duration)
     display_audit["result"] = np.where(display_audit["actual_pnl"] > 0, "Win", np.where(display_audit["actual_pnl"] < 0, "Loss", "Flat"))
+    display_audit = display_audit.rename(columns={"ended": "trade_exited"})
     audit_cols = [
         "started",
         "side",
@@ -298,6 +301,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         "target1",
         "suggested_profit",
         "suggested_loss",
+        "trade_exited",
         "exit_price",
         "actual_pnl",
         "actual_r",
