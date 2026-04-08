@@ -3,6 +3,7 @@
 # ==============================
 from datetime import datetime
 import time
+from typing import List
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -327,7 +328,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     st.dataframe(display_audit[audit_cols], use_container_width=True, hide_index=True)
 
 
-def render_recent_ready_assets_section(symbols: list[str], interval: str, include_prepost: bool) -> pd.DataFrame:
+def render_recent_ready_assets_section(symbols: List[str], interval: str, include_prepost: bool) -> pd.DataFrame:
     lookback_days = READINESS_LOOKBACK_HOURS // 24
     ready_assets = get_recent_ready_assets(symbols, interval=interval, include_prepost=include_prepost, lookback_hours=READINESS_LOOKBACK_HOURS)
     st.subheader(f"Assets with ready signals in last {lookback_days} days")
