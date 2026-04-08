@@ -39,14 +39,19 @@ st.set_page_config(page_title="Pro Intraday Scanner", layout="wide")
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 
 RESULT_DEFAULTS = {
+    "scanner_status": "unknown",
+    "scanner_qualified": False,
     "status": "unknown",
     "qualified": False,
+    "accepted": False,
+    "acceptance_status": "unknown",
     "signal": "N/A",
     "conviction": pd.NA,
     "price": pd.NA,
     "relvol": pd.NA,
     "rsi": pd.NA,
     "spread_proxy_pct": pd.NA,
+    "vwap_distance_pct": pd.NA,
     "trigger_ready": False,
     "trigger_text": "No trigger data",
     "reasons": "No detailed data",
@@ -218,6 +223,100 @@ def _format_melbourne_time(value) -> str:
         ts = ts.tz_localize("UTC")
     ts = ts.tz_convert(MELBOURNE_TZ)
     return ts.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def apply_acceptance_criteria(
+    all_results: pd.DataFrame,
+    *,
+    block_choppy_regime: bool,
+    block_high_event_risk: bool,
+    min_setup_relvol: float,
+    neutral_rsi_low: int,
+    neutral_rsi_high: int,
+    min_vwap_gap_pct: float,
+    min_quality_score: int,
+) -> pd.DataFrame:
+    if all_results.empty:
+        return all_results.copy()
+
+    evaluated = all_results.copy()
+    acceptance_statuses = []
+    accepted_flags = []
+
+    for _, row in evaluated.iterrows():
+        scanner_status = str(row.get("scanner_status", row.get("status", "unknown")))
+        if scanner_status == "insufficient_data":
+            acceptance_statuses.append("insufficient_data")
+            accepted_flags.append(False)
+            continue
+
+        if block_choppy_regime and row.get("regime") == "CHOPPY":
+            acceptance_statuses.append("regime_blocked")
+            accepted_flags.append(False)
+        elif block_high_event_risk and row.get("event_risk") == "HIGH":
+            acceptance_statuses.append("event_blocked")
+            accepted_flags.append(False)
+        elif pd.notna(row.get("relvol")) and float(row["relvol"]) < min_setup_relvol:
+            acceptance_statuses.append("low_volume")
+            accepted_flags.append(False)
+        elif (
+            pd.notna(row.get("rsi"))
+            and neutral_rsi_low < float(row["rsi"]) < neutral_rsi_high
+        ):
+            acceptance_statuses.append("neutral_rsi")
+            accepted_flags.append(False)
+        elif (
+            pd.notna(row.get("vwap_distance_pct"))
+            and float(row["vwap_distance_pct"]) < min_vwap_gap_pct
+        ):
+            acceptance_statuses.append("vwap_indecision")
+            accepted_flags.append(False)
+        elif pd.notna(row.get("quality_score")) and float(row["quality_score"]) < min_quality_score:
+            acceptance_statuses.append("low_quality")
+            accepted_flags.append(False)
+        else:
+            acceptance_statuses.append("ok")
+            accepted_flags.append(True)
+
+    evaluated["acceptance_status"] = acceptance_statuses
+    evaluated["accepted"] = accepted_flags
+    evaluated["status"] = evaluated["acceptance_status"]
+    evaluated["qualified"] = evaluated["accepted"]
+    return evaluated
+
+
+def render_acceptance_diagnostics(all_results: pd.DataFrame):
+    st.subheader("Acceptance diagnostics")
+    st.caption("Shows how the current acceptance criteria are filtering the latest scan, so you can tune thresholds without guessing.")
+
+    if all_results.empty:
+        st.caption("No scan data available yet.")
+        return
+
+    total = len(all_results)
+    accepted = int(all_results["accepted"].sum()) if "accepted" in all_results.columns else 0
+    rejected = total - accepted
+    ready_in_accepted = int((all_results["accepted"] & all_results["trigger_ready"]).sum()) if "accepted" in all_results.columns else 0
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        render_metric_card("Accepted now", f"{accepted} / {total}")
+    with c2:
+        reject_rate = rejected / total * 100 if total else 0
+        render_metric_card("Rejected rate", f"{reject_rate:.1f}%")
+    with c3:
+        render_metric_card("Ready in accepted", str(ready_in_accepted))
+
+    breakdown = (
+        all_results["acceptance_status"]
+        .fillna("unknown")
+        .value_counts(dropna=False)
+        .rename_axis("acceptance_status")
+        .reset_index(name="count")
+    )
+    breakdown["rate_pct"] = (breakdown["count"] / total * 100).round(1)
+    breakdown["acceptance_status"] = breakdown["acceptance_status"].str.replace("_", " ").str.title()
+    st.dataframe(breakdown, use_container_width=True, hide_index=True)
 
 
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool, history_mode: str):
@@ -506,6 +605,7 @@ default_scan_mode_index = mode_options.index(DEFAULT_SCAN_MODE) if DEFAULT_SCAN_
 default_history_mode_index = mode_options.index(DEFAULT_HISTORY_MODE) if DEFAULT_HISTORY_MODE in mode_options else 0
 scan_mode = st.sidebar.selectbox("Scanner mode", mode_options, index=default_scan_mode_index)
 history_mode = st.sidebar.selectbox("History mode", mode_options, index=default_history_mode_index)
+mode_defaults = SCANNER_MODES[scan_mode]
 include_prepost = st.sidebar.checkbox("Include pre/post market", value=True)
 min_conviction = st.sidebar.slider("Minimum conviction", 0, 100, 45)
 min_relvol = st.sidebar.slider("Minimum relative volume", 0.0, 5.0, 0.5, 0.1)
@@ -515,6 +615,43 @@ only_trigger_ready = st.sidebar.checkbox("Only show trigger-ready setups", value
 event_risk_filter = st.sidebar.selectbox("Event risk filter", ["All", "Hide HIGH", "Only HIGH"], index=0)
 news_filter = st.sidebar.selectbox("News tone filter", ["All", "Bullish only", "Bearish only", "Neutral only"], index=0)
 options_filter = st.sidebar.selectbox("Options flow filter", ["All", "Bullish only", "Bearish only"], index=0)
+st.sidebar.markdown("**Acceptance criteria**")
+accept_min_quality = st.sidebar.slider(
+    "Minimum quality score",
+    0,
+    7,
+    int(mode_defaults["min_quality_score"]),
+    1,
+)
+accept_min_setup_relvol = st.sidebar.slider(
+    "Minimum setup rel vol",
+    0.0,
+    3.0,
+    float(mode_defaults["min_setup_relvol"]),
+    0.05,
+)
+accept_neutral_rsi = st.sidebar.slider(
+    "Neutral RSI zone",
+    0,
+    100,
+    (int(mode_defaults["rsi_neutral_low"]), int(mode_defaults["rsi_neutral_high"])),
+    1,
+)
+accept_min_vwap_gap = st.sidebar.slider(
+    "Minimum VWAP gap %",
+    0.0,
+    1.0,
+    float(mode_defaults["min_vwap_distance_pct"]),
+    0.01,
+)
+block_choppy_regime = st.sidebar.checkbox(
+    "Reject CHOPPY regime",
+    value=bool(mode_defaults["hard_block_choppy"]),
+)
+block_high_event_risk = st.sidebar.checkbox(
+    "Reject HIGH event risk",
+    value=bool(mode_defaults["hard_block_high_event"]),
+)
 scan_pause = st.sidebar.slider("Pause between requests (seconds)", 0.0, 0.5, 0.0, 0.05)
 max_symbols = st.sidebar.slider("Max symbols to scan", 5, 250, min(50, max(5, len(symbols))))
 auto_refresh = st.sidebar.checkbox("Auto refresh every 2 min", value=False)
@@ -565,8 +702,20 @@ if run_scan or auto_refresh:
         mode=scan_mode,
     )
     all_results = raw_results.copy()
-    results = all_results[all_results.get("qualified", False)].copy() if not all_results.empty else pd.DataFrame()
     scan_timestamp = pd.Timestamp.now(tz=MELBOURNE_TZ)
+    st.session_state.last_all_scan = all_results
+    st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+    acceptance_ready = apply_acceptance_criteria(
+        all_results,
+        block_choppy_regime=block_choppy_regime,
+        block_high_event_risk=block_high_event_risk,
+        min_setup_relvol=accept_min_setup_relvol,
+        neutral_rsi_low=accept_neutral_rsi[0],
+        neutral_rsi_high=accept_neutral_rsi[1],
+        min_vwap_gap_pct=accept_min_vwap_gap,
+        min_quality_score=accept_min_quality,
+    )
+    results = acceptance_ready[acceptance_ready["accepted"]].copy() if not acceptance_ready.empty else pd.DataFrame()
     if not results.empty:
         results = results[
             (results["conviction"] >= min_conviction)
@@ -577,8 +726,6 @@ if run_scan or auto_refresh:
         if only_trigger_ready:
             results = results[results["trigger_ready"]].reset_index(drop=True)
     st.session_state.last_scan = results
-    st.session_state.last_all_scan = all_results
-    st.session_state.scanned_at = scan_timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
     if telegram_alerts_enabled():
         bot_token = get_telegram_bot_token()
         chat_id = get_telegram_default_chat_id()
@@ -591,20 +738,34 @@ if run_scan or auto_refresh:
             notified_cache=st.session_state.telegram_notified_signals,
         )
 
-results = st.session_state.last_scan
 all_results = st.session_state.last_all_scan
 if not all_results.empty:
     all_results = all_results.copy()
     for column, default_value in RESULT_DEFAULTS.items():
         if column not in all_results.columns:
             all_results[column] = default_value
+    all_results = apply_acceptance_criteria(
+        all_results,
+        block_choppy_regime=block_choppy_regime,
+        block_high_event_risk=block_high_event_risk,
+        min_setup_relvol=accept_min_setup_relvol,
+        neutral_rsi_low=accept_neutral_rsi[0],
+        neutral_rsi_high=accept_neutral_rsi[1],
+        min_vwap_gap_pct=accept_min_vwap_gap,
+        min_quality_score=accept_min_quality,
+    )
     st.session_state.last_all_scan = all_results
+results = all_results[all_results["accepted"]].copy() if not all_results.empty else pd.DataFrame()
 if not results.empty:
-    results = results.copy()
-    for column, default_value in RESULT_DEFAULTS.items():
-        if column not in results.columns:
-            results[column] = default_value
-    st.session_state.last_scan = results
+    results = results[
+        (results["conviction"] >= min_conviction)
+        & (results["relvol"] >= min_relvol)
+        & (results["change_pct"].abs() >= min_abs_change)
+        & (results["spread_proxy_pct"] <= max_spread_proxy)
+    ].reset_index(drop=True)
+    if only_trigger_ready:
+        results = results[results["trigger_ready"]].reset_index(drop=True)
+st.session_state.last_scan = results
 
 r1, r2, r3, r4, r5 = st.columns(5)
 with r1:
@@ -737,16 +898,18 @@ with main_left:
         st.dataframe(styled_view, use_container_width=True, hide_index=True)
         render_options_opportunity_board(view)
 
-    blocked = all_results[all_results["status"] != "ok"].copy() if not all_results.empty else pd.DataFrame()
+    render_acceptance_diagnostics(all_results)
+
+    blocked = all_results[all_results["accepted"] == False].copy() if not all_results.empty else pd.DataFrame()
     st.subheader("Rejected symbols diagnostics")
-    st.caption("These symbols were scanned but filtered out by the decision engine. This helps explain why you may see zero qualified setups.")
+    st.caption("These symbols are currently filtered out by your acceptance criteria. Move the criteria controls in the sidebar and this table will update immediately.")
     if blocked.empty:
         st.caption("No blocked symbols in the latest scan.")
     else:
-        blocked["status_reason"] = blocked["status"].str.replace("_", " ").str.title()
+        blocked["status_reason"] = blocked["acceptance_status"].str.replace("_", " ").str.title()
         blocked_cols = [
             "symbol", "status_reason", "signal", "quality_score", "conviction", "price",
-            "relvol", "rsi", "spread_proxy_pct", "event_risk", "trigger_ready", "trigger_text"
+            "relvol", "rsi", "vwap_distance_pct", "spread_proxy_pct", "event_risk", "trigger_ready", "trigger_text"
         ]
         st.dataframe(blocked[blocked_cols], use_container_width=True, hide_index=True)
 
