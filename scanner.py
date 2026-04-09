@@ -120,6 +120,26 @@ def mtf_confirmation(symbol: str, include_prepost: bool) -> Dict:
     return {"bias_5m": b5, "bias_15m": b15, "bias_60m": b60, "state": state}
 
 
+def _effective_relvol(last: pd.Series, prev: pd.Series) -> float:
+    """Last-bar volume is often 0 outside RTH (stale Yahoo quote); impute for gating and triggers."""
+    vol = float(last.get("Volume", 0) or 0)
+    r = last.get("RelVol", np.nan)
+    try:
+        rf = float(r) if pd.notna(r) else np.nan
+    except (TypeError, ValueError):
+        rf = np.nan
+    if vol > 0 and pd.notna(rf) and rf > 0:
+        return rf
+    pr = prev.get("RelVol", np.nan)
+    try:
+        pf = float(pr) if pd.notna(pr) else np.nan
+    except (TypeError, ValueError):
+        pf = np.nan
+    if pd.notna(pf) and pf > 0:
+        return pf
+    return 1.0
+
+
 def build_trade_plan(signal: str, price: float, atr_value: float, levels: Dict) -> Dict:
     atr_value = 0 if pd.isna(atr_value) else float(atr_value)
     support = levels.get("support", np.nan)
@@ -164,7 +184,7 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict, mode: str = DEFAU
     mode_config = _get_mode_config(mode)
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    relvol = float(last.get("RelVol", 0) or 0)
+    relvol = _effective_relvol(last, prev)
     close_price = float(last["Close"])
     open_price = float(last["Open"])
     high_price = float(last["High"])
@@ -262,7 +282,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     session_high = float(df["High"].max())
     session_low = float(df["Low"].min())
     change_pct = ((price - session_open) / session_open * 100) if session_open else np.nan
-    relvol = float(latest["RelVol"]) if pd.notna(latest["RelVol"]) else 0.0
+    relvol = _effective_relvol(latest, prev)
     rsi_now = float(latest["RSI14"]) if pd.notna(latest["RSI14"]) else np.nan
     atr_value = float(latest["ATR14"]) if pd.notna(latest["ATR14"]) else np.nan
     atr_pct = (atr_value / price * 100) if price else np.nan
@@ -600,11 +620,11 @@ def get_readiness_timeline(
 ) -> pd.DataFrame:
     history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
-    if raw.empty or len(raw) < 35:
+    if raw.empty or len(raw) < 32:
         return pd.DataFrame()
 
     df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
-    if df.empty or len(df) < 35:
+    if df.empty or len(df) < 32:
         return pd.DataFrame()
 
     cutoff = pd.Timestamp(df.index[-1]) - pd.Timedelta(hours=lookback_hours)
@@ -833,11 +853,11 @@ def get_readiness_trade_audit(
 ) -> pd.DataFrame:
     history_period = _history_period_for_interval(interval)
     raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
-    if raw.empty or len(raw) < 35:
+    if raw.empty or len(raw) < 32:
         return pd.DataFrame()
 
     df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
-    if df.empty or len(df) < 35:
+    if df.empty or len(df) < 32:
         return pd.DataFrame()
 
     last_ts = pd.Timestamp(df.index[-1])
