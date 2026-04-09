@@ -93,8 +93,18 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["RSI14"] = rsi(close, 14)
     out["ATR14"] = atr(out, 14)
     out["MACD"], out["MACD_SIGNAL"], out["MACD_HIST"] = macd(close)
-    out["RollingVol20"] = volume.rolling(20).mean().replace(0, np.nan)
-    out["RelVol"] = volume / out["RollingVol20"]
+    roll = volume.rolling(20, min_periods=5).mean()
+    roll = roll.replace(0, np.nan)
+    rv = volume / roll
+    rv = rv.replace([np.inf, -np.inf], np.nan)
+    rv = rv.ffill(limit=15).bfill(limit=15).fillna(1.0)
+    rv = rv.clip(lower=0.01, upper=100.0)
+    if len(rv) >= 2 and float(volume.iloc[-1] or 0) <= 0:
+        rv = rv.copy()
+        pv = rv.iloc[-2]
+        rv.iloc[-1] = float(pv) if pd.notna(pv) and float(pv) > 0 else 1.0
+    out["RollingVol20"] = roll
+    out["RelVol"] = rv
     out["SpreadProxyPct"] = (high - low).rolling(3).mean() / close.replace(0, np.nan) * 100
     return out
 
