@@ -2,7 +2,6 @@
 # file: app.py
 # ==============================
 from datetime import datetime
-import time
 from typing import List
 from zoneinfo import ZoneInfo
 
@@ -10,7 +9,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from config import DEFAULT_UNIVERSES, DEFAULT_CUSTOM_SYMBOLS
+from config import (
+    DEFAULT_CUSTOM_SYMBOLS,
+    DEFAULT_UNIVERSES,
+    INCLUDE_PREPOST_DEFAULT,
+    SCAN_INTERVAL,
+    SCAN_PERIOD,
+)
 from data_utils import detect_market_regime, parse_symbol_input
 from execution import build_order_ticket, get_broker_adapter, ticket_to_frame
 from notifications import (
@@ -54,6 +59,7 @@ RESULT_DEFAULTS = {
     "vwap_distance_pct": pd.NA,
     "trigger_ready": False,
     "trigger_text": "No trigger data",
+    "trigger_detail": "",
     "reasons": "No detailed data",
     "news_sentiment": "UNKNOWN",
     "option_bias": "UNAVAILABLE",
@@ -223,6 +229,26 @@ def render_htf_ltf_workflow_note():
         )
 
 
+def render_trigger_ready_explainer():
+    ex = SCANNER_MODES["Exploratory"]
+    with st.expander("What “Trigger READY” checks (latest bar only)"):
+        st.markdown(
+            f"""
+**Two steps:** (1) **Scanner filters** (setup volume, VWAP distance, quality, etc.) must pass so **`status` = ok**.  
+(2) **Trigger READY** is **stricter**: only the **most recent bar** must prove a **breakout** with enough **relative volume** and a **strong directional close**.
+
+**Exploratory** trigger floors: **RelVol ≥ {ex["min_trigger_relvol"]}×** vs the 20-bar average volume, **candle strength ≥ {ex["close_strength_min"]}** (close near the top/bottom of the bar’s range).
+
+| Side | VWAP | Level | Volume | Candle |
+|------|------|--------|--------|--------|
+| **LONG** | Close **above** VWAP | Close **and** high ≥ max(prior high, prev swing high) + small buffer | RelVol ≥ min | Close **>** open, strong close in range |
+| **SHORT** | Close **below** VWAP | Close **and** low ≤ min(prior low, prev swing low) − buffer | RelVol ≥ min | Close **<** open, strong breakdown in range |
+
+**WAIT** with high conviction usually means the **bias** is there, but this bar has **not** yet broken the prior level with enough **volume** — e.g. RelVol **0.01** vs required **{ex["min_trigger_relvol"]}**. Open **Why WAIT / what READY needs** under Setup inspection for the exact failed checks on that symbol.
+            """
+        )
+
+
 def render_scan_outcome_diagnostics(scan_df: pd.DataFrame, period: str, interval: str) -> None:
     """Help distinguish Yahoo bar shortages from scanner rule rejections."""
     with st.expander("Diagnostics: data vs filters", expanded=False):
@@ -262,9 +288,9 @@ def render_scan_outcome_diagnostics(scan_df: pd.DataFrame, period: str, interval
             st.caption("Symbols with **insufficient_data** (first 20): " + ", ".join(bad))
 
         st.markdown(
-            "**How to read this:** If **Insufficient bars** is high, raise **lookback period** (e.g. `5d`), "
-            "use **5m/15m** instead of **1m**, or check the network / Yahoo. "
-            "If **Blocked by rules** is high while data is ok, loosen **Scanner mode** or inspect the **Reasoning** column for each block."
+            "**How to read this:** If **Insufficient bars** is high, Yahoo returned too few bars for that symbol "
+            f"at **{SCAN_PERIOD}** / **{SCAN_INTERVAL}** (see `config.py`). "
+            "If **Blocked by rules** is high while data is ok, loosen **Scanner mode** or inspect **Reasoning**."
         )
 
 
@@ -330,56 +356,32 @@ def _readiness_lookback_label() -> str:
     return f"{h} hours" if h != 1 else "1 hour"
 
 
-def _history_interval_candidates(interval: str) -> List[str]:
-    fallback_map = {
-        "1m": ["1m", "5m", "15m", "30m"],
-        "2m": ["2m", "5m", "15m", "30m"],
-        "5m": ["5m", "15m", "30m"],
-        "15m": ["15m", "30m", "5m"],
-        "30m": ["30m", "15m", "5m"],
-    }
-    return fallback_map.get(interval, [interval, "15m", "30m"])
-
-
-def _history_mode_candidates(history_mode: str) -> List[str]:
-    ordered = [history_mode, "Balanced", "Exploratory", "Strict"]
-    seen = set()
-    return [mode for mode in ordered if not (mode in seen or seen.add(mode))]
+def _trigger_ready_mask(df: pd.DataFrame) -> pd.Series:
+    """Boolean mask safe for indexing; pandas rejects NA in boolean masks."""
+    if df.empty or "trigger_ready" not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    return df["trigger_ready"].fillna(False).astype(bool)
 
 
 def _resolve_signal_timing_data(symbol: str, interval: str, include_prepost: bool, history_mode: str):
-    attempted = []
-    for candidate_interval in _history_interval_candidates(interval):
-        for candidate_mode in _history_mode_candidates(history_mode):
-            timeline = get_readiness_timeline(
-                symbol,
-                interval=candidate_interval,
-                include_prepost=include_prepost,
-                lookback_hours=READINESS_LOOKBACK_HOURS,
-                mode=candidate_mode,
-            )
-            attempted.append(f"{candidate_interval}/{candidate_mode}")
-            if timeline.empty:
-                continue
-            audit_df = get_readiness_trade_audit(
-                symbol,
-                interval=candidate_interval,
-                include_prepost=include_prepost,
-                lookback_hours=READINESS_LOOKBACK_HOURS,
-                mode=candidate_mode,
-            )
-            return {
-                "timeline": timeline,
-                "audit_df": audit_df,
-                "used_interval": candidate_interval,
-                "used_mode": candidate_mode,
-                "fallback_used": candidate_interval != interval or candidate_mode != history_mode,
-                "attempted": attempted,
-            }
-
+    timeline = get_readiness_timeline(
+        symbol,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
+    audit_df = get_readiness_trade_audit(
+        symbol,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
+    attempted = [f"{interval}/{history_mode}"]
     return {
-        "timeline": pd.DataFrame(),
-        "audit_df": pd.DataFrame(),
+        "timeline": timeline,
+        "audit_df": audit_df,
         "used_interval": interval,
         "used_mode": history_mode,
         "fallback_used": False,
@@ -388,64 +390,40 @@ def _resolve_signal_timing_data(symbol: str, interval: str, include_prepost: boo
 
 
 def _resolve_recent_ready_assets(symbols: List[str], interval: str, include_prepost: bool, history_mode: str):
-    attempted = []
-    for candidate_interval in _history_interval_candidates(interval):
-        for candidate_mode in _history_mode_candidates(history_mode):
-            ready_assets = get_recent_ready_assets(
-                symbols,
-                interval=candidate_interval,
-                include_prepost=include_prepost,
-                lookback_hours=READINESS_LOOKBACK_HOURS,
-                mode=candidate_mode,
-            )
-            attempted.append(f"{candidate_interval}/{candidate_mode}")
-            if ready_assets.empty:
-                continue
-            return {
-                "ready_assets": ready_assets,
-                "used_interval": candidate_interval,
-                "used_mode": candidate_mode,
-                "fallback_used": candidate_interval != interval or candidate_mode != history_mode,
-                "attempted": attempted,
-            }
-
+    ready_assets = get_recent_ready_assets(
+        symbols,
+        interval=interval,
+        include_prepost=include_prepost,
+        lookback_hours=READINESS_LOOKBACK_HOURS,
+        mode=history_mode,
+    )
     return {
-        "ready_assets": pd.DataFrame(),
+        "ready_assets": ready_assets,
         "used_interval": interval,
         "used_mode": history_mode,
         "fallback_used": False,
-        "attempted": attempted,
+        "attempted": [f"{interval}/{history_mode}"],
     }
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_portfolio_trade_audit(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
-    """Merge per-symbol readiness audits. Tries fallback bar sizes/modes when the primary history is empty (same idea as signal timing)."""
+    """Merge per-symbol readiness audits (single Yahoo window per symbol)."""
     audit_frames = []
     for symbol in symbols:
-        symbol_audit = pd.DataFrame()
-        used_interval = interval
-        used_mode = history_mode
-        for candidate_interval in _history_interval_candidates(interval):
-            for candidate_mode in _history_mode_candidates(history_mode):
-                symbol_audit = get_readiness_trade_audit(
-                    symbol,
-                    interval=candidate_interval,
-                    include_prepost=include_prepost,
-                    lookback_hours=READINESS_LOOKBACK_HOURS,
-                    mode=candidate_mode,
-                )
-                if not symbol_audit.empty:
-                    used_interval, used_mode = candidate_interval, candidate_mode
-                    break
-            if not symbol_audit.empty:
-                break
+        symbol_audit = get_readiness_trade_audit(
+            symbol,
+            interval=interval,
+            include_prepost=include_prepost,
+            lookback_hours=READINESS_LOOKBACK_HOURS,
+            mode=history_mode,
+        )
         if symbol_audit.empty:
             continue
         enriched = symbol_audit.copy()
         enriched["symbol"] = symbol
-        enriched["audit_interval"] = used_interval
-        enriched["audit_mode"] = used_mode
+        enriched["audit_interval"] = interval
+        enriched["audit_mode"] = history_mode
         audit_frames.append(enriched)
 
     if not audit_frames:
@@ -460,7 +438,8 @@ def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, i
     st.subheader("Profitable Traits")
     st.caption(
         "Tracks simulated outcomes for past `READY` windows (stop vs Target 1 vs end of history) across scanned symbols, "
-        "using the same readiness audit as Signal timing. Empty results usually mean sparse data at your bar size — try **5m**/**15m** or **Exploratory** history mode."
+        f"using the same readiness audit as Signal timing at **{SCAN_INTERVAL}**. "
+        "Empty results usually mean sparse Yahoo data or no scored windows — try **Exploratory** history mode."
     )
 
     if all_results.empty:
@@ -472,21 +451,15 @@ def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, i
         st.info(
             "No audited trades were available for these symbols. "
             "The engine needs enough bars and at least one closed `READY` window with forward bars. "
-            "Try **5m** or **15m** interval, **Exploratory** history mode, or fewer symbols if downloads are failing."
+            "Try **Exploratory** history mode or fewer symbols if downloads are failing."
         )
         return
-
-    if "audit_interval" in audit_df.columns and (audit_df["audit_interval"] != interval).any():
-        alt = audit_df["audit_interval"].mode()
-        st.caption(
-            f"Some audits used fallback bar sizes (for example `{alt.iloc[0] if len(alt) else '?'}`) because the primary interval produced no scored history."
-        )
 
     completed = audit_df[audit_df["outcome_status"] != "no_follow_through"].copy()
     if completed.empty:
         st.info(
             "Audits were found, but every row was still `no_follow_through` (no forward bars after the signal). "
-            "Switch to **5m** or **15m** in the sidebar so the provider returns enough history to score outcomes."
+            "The fixed Yahoo window may be too short for that symbol, or there was no follow-through."
         )
         return
 
@@ -564,12 +537,6 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         f"Shows when this symbol was `READY` to buy or sell over the last {lookback_lbl} "
         f"based on recent market bars using `{history_mode}` history rules. All times below are in Melbourne time."
     )
-
-    if resolved["fallback_used"]:
-        st.caption(
-            f"Auto-fallback used `interval={resolved['used_interval']}` and `history mode={resolved['used_mode']}` "
-            f"because the requested history did not have enough usable data."
-        )
 
     if timeline.empty:
         st.info(f"Not enough recent bar data to build a readiness history for the last {lookback_lbl} for this symbol.")
@@ -685,33 +652,17 @@ def render_recent_ready_assets_section(symbols: List[str], interval: str, includ
         f"even if they are not ready right now. The list currently uses `{history_mode}` history rules."
     )
 
-    if resolved["fallback_used"]:
-        st.caption(
-            f"Auto-fallback used `interval={resolved['used_interval']}` and `history mode={resolved['used_mode']}` "
-            f"to find usable recent-ready history."
-        )
-
-    if interval == "1m":
-        st.caption(
-            f"Note: `1m` history is usually limited by the data provider, so the full last-{lookback_lbl} window may not be available at that interval."
-        )
-
     if ready_assets.empty:
-        st.info(f"No scanned symbols showed a recorded `READY` event in the last {lookback_lbl} at the current interval.")
+        st.info(
+            f"No scanned symbols showed a recorded `READY` event in the last {lookback_lbl} "
+            f"at **{SCAN_INTERVAL}** (`{history_mode}` rules)."
+        )
         st.markdown(
+            f"""
+**Typical reasons:** Yahoo returned sparse bars for some names, or no bar in that window passed the full **READY** trigger
+(breakout + volume + candle). The live scan can still rank symbols without a historical **READY** in 48h.
+Bars are fixed at **{SCAN_PERIOD}** / **{SCAN_INTERVAL}** in `config.py`. Try liquid names during the US session or **Exploratory** history mode.
             """
-**This is usually not a single “broken feed” — it is often a mix of data limits and strict rules:**
-
-1. **Source (Yahoo Finance via `yfinance`)** — Free/delayed data, occasional gaps, and **1m** history is shorter and patchier than **5m/15m**. Symbols can fail the minimum bar count (`35+` bars) and be skipped quietly.
-
-2. **What counts as `READY` here** — The history list only marks bars that pass the **full trigger** (break of prior high/low, VWAP side, relative volume, directional close, etc.) on **that bar interval**, inside the **last 48 hours**. The main scan can still show a symbol as interesting without any bar in that window counting as `READY`.
-
-3. **Time and liquidity** — Outside regular session, on very quiet days, or with a small symbol list, it is normal to see **zero** qualifying bars in 48 hours.
-
-**Things to try:** use **5m** or **15m**, scan more **liquid** names (mega caps / ETFs), run during **US cash session**, and confirm **Exploratory** history mode. Fallbacks were tried across: `"""
-            + ", ".join(resolved.get("attempted", [])[:12])
-            + ("…" if len(resolved.get("attempted", [])) > 12 else "")
-            + "`."
         )
         return ready_assets
 
@@ -846,24 +797,29 @@ if universe_name == "Custom":
 else:
     symbols = DEFAULT_UNIVERSES[universe_name]
 
-period = st.sidebar.selectbox("Lookback period", ["1d", "5d", "1mo"], index=0)
-interval = st.sidebar.selectbox("Bar interval", ["1m", "2m", "5m", "15m", "30m"], index=2)
+period = SCAN_PERIOD
+interval = SCAN_INTERVAL
+include_prepost = INCLUDE_PREPOST_DEFAULT
 mode_options = list(SCANNER_MODES.keys())
 default_scan_mode_index = mode_options.index(DEFAULT_SCAN_MODE) if DEFAULT_SCAN_MODE in mode_options else 0
 default_history_mode_index = mode_options.index(DEFAULT_HISTORY_MODE) if DEFAULT_HISTORY_MODE in mode_options else 0
 scan_mode = st.sidebar.selectbox("Scanner mode", mode_options, index=default_scan_mode_index)
 history_mode = st.sidebar.selectbox("History mode", mode_options, index=default_history_mode_index)
-include_prepost = st.sidebar.checkbox("Include pre/post market", value=True)
 scan_pause = st.sidebar.slider("Pause between requests (seconds)", 0.0, 0.5, 0.0, 0.05)
 max_symbols = st.sidebar.slider("Max symbols to scan", 5, 250, min(50, max(5, len(symbols))))
-auto_refresh = st.sidebar.checkbox("Auto refresh every 2 min", value=False)
+st.sidebar.caption("Refresh data with **Run Pro Scan** (the old auto-refresh loop was removed to avoid freezing the tab).")
 run_scan = st.sidebar.button("Run Pro Scan", type="primary", use_container_width=True)
 test_telegram_ping = st.sidebar.button("Send Telegram test ping", use_container_width=True)
 
 st.title("Pro Intraday Market Scanner")
 st.caption("Ranks symbols for manual intraday decisions using regime, structure, momentum, multi-timeframe alignment, triggers and risk planning.")
 st.caption("All displayed times use Australia/Melbourne.")
-st.caption(f"Live scan mode: `{scan_mode}`. History mode: `{history_mode}`.")
+st.caption(
+    f"Live scan mode: `{scan_mode}`. History mode: `{history_mode}`. "
+    f"Yahoo bars: **{SCAN_PERIOD}** @ **{SCAN_INTERVAL}** (fixed in `config.py`). "
+    "Each download uses one request with a period capped to Yahoo's limits for that interval; "
+    "5m scans derive 15m/60m alignment by resampling the same bars (no extra Yahoo pulls)."
+)
 
 with st.expander("How to use this tool"):
     st.write(
@@ -879,6 +835,7 @@ with st.expander("How to use this tool"):
 
 render_beginner_guide()
 render_htf_ltf_workflow_note()
+render_trigger_ready_explainer()
 render_telegram_diagnostics()
 
 regime = detect_market_regime()
@@ -893,7 +850,7 @@ if test_telegram_ping:
         message=ping_message,
     )
 
-if run_scan or auto_refresh:
+if run_scan:
     shortlist = symbols[:max_symbols]
     all_results = scan_symbols(
         symbols=shortlist,
@@ -912,7 +869,7 @@ if run_scan or auto_refresh:
     if telegram_alerts_enabled():
         bot_token = get_telegram_bot_token()
         chat_id = get_telegram_default_chat_id()
-        ready_alerts = results[results["trigger_ready"]].copy() if not results.empty else pd.DataFrame()
+        ready_alerts = results.loc[_trigger_ready_mask(results)].copy() if not results.empty else pd.DataFrame()
         st.session_state.telegram_last_status = send_ready_signal_notifications(
             ready_df=ready_alerts,
             bot_token=bot_token,
@@ -935,6 +892,8 @@ if not all_results.empty:
         all_results["scanner_qualified"] = all_results["scanner_status"].eq("ok")
     elif "status" in all_results.columns:
         all_results["qualified"] = all_results["status"].eq("ok")
+    if "trigger_ready" in all_results.columns:
+        all_results["trigger_ready"] = all_results["trigger_ready"].fillna(False).astype(bool)
     st.session_state.last_all_scan = all_results
 results = all_results.copy() if not all_results.empty else pd.DataFrame()
 st.session_state.last_scan = results
@@ -957,7 +916,7 @@ with m1:
 with m2:
     render_metric_card("Ranked symbols", str(len(results)))
 with m3:
-    ready_count = int(results["trigger_ready"].sum()) if not results.empty else 0
+    ready_count = int(_trigger_ready_mask(results).sum()) if not results.empty else 0
     render_metric_card("Trigger-ready", str(ready_count))
 with m4:
     render_metric_card("Watchlist", str(len(st.session_state.watchlist)))
@@ -966,9 +925,6 @@ render_scan_outcome_diagnostics(results, period=period, interval=interval)
 
 if all_results.empty:
     st.warning("No scan results yet. Either the market is dead, the data provider returned nothing, or the chosen symbols are not moving.")
-    if auto_refresh:
-        time.sleep(120)
-        st.rerun()
     st.stop()
 
 if results.empty:
@@ -980,7 +936,7 @@ summary_left, summary_right = st.columns([1.35, 1])
 
 with summary_left:
     st.subheader("Live opportunities")
-    alerts = results[results["trigger_ready"]].head(6)
+    alerts = results.loc[_trigger_ready_mask(results)].head(6)
     if not alerts.empty:
         for _, row in alerts.iterrows():
             badge_signal = "🟢 LONG" if row["signal"] == "LONG" else "🔴 SHORT"
@@ -1056,8 +1012,6 @@ with main_left:
         st.dataframe(styled_view, use_container_width=True, hide_index=True)
         render_options_opportunity_board(candidate_view)
 
-    render_profitable_traits_section(all_results, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
-
 with main_right:
     st.subheader("Watchlist")
     watchlist_source = candidate_view["symbol"].tolist()
@@ -1098,9 +1052,6 @@ st.caption("Selected symbol with chart, trade plan, rejection reason if any, and
 inspect_pool = all_results[all_results["chart"].notna()].copy() if "chart" in all_results.columns else all_results.copy()
 if inspect_pool.empty:
     st.info("No chart-capable symbols are available from the latest scan.")
-    if auto_refresh:
-        time.sleep(120)
-        st.rerun()
     st.stop()
 recent_ready_assets = render_recent_ready_assets_section(
     inspect_pool["symbol"].tolist(),
@@ -1139,6 +1090,9 @@ render_setup_detail(
 )
 render_market_intel(selected)
 render_signal_timing_section(selected_symbol, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
+
+st.markdown("---")
+render_profitable_traits_section(all_results, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
 
 st.markdown("---")
 st.subheader("Execution ticket")
@@ -1249,7 +1203,3 @@ with st.expander("Future upgrades"):
     st.write(
         "This build now includes a public-data news snapshot, option chain snapshot, event calendar filter, a labeled spread/liquidity proxy, and manual-confirm execution tickets. The next upgrade would be swapping those providers to real-time news and a supported broker or futures API."
     )
-
-if auto_refresh:
-    time.sleep(120)
-    st.rerun()

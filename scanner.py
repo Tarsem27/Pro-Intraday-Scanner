@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from data_utils import add_indicators, download_history, normalize_score
+from data_utils import (
+    add_indicators,
+    download_history,
+    max_yahoo_period_for_interval,
+    normalize_score,
+    resample_ohlcv,
+)
 from market_intel import get_symbol_intel
 
 
@@ -89,10 +95,30 @@ def support_resistance(df: pd.DataFrame) -> Dict:
     }
 
 
-def mtf_confirmation(symbol: str, include_prepost: bool) -> Dict:
-    tf5 = download_history(symbol, period="1d", interval="5m", include_prepost=include_prepost)
-    tf15 = download_history(symbol, period="5d", interval="15m", include_prepost=include_prepost)
-    tf60 = download_history(symbol, period="1mo", interval="60m", include_prepost=include_prepost)
+def mtf_confirmation(
+    symbol: str,
+    include_prepost: bool,
+    primary_df: Optional[pd.DataFrame] = None,
+    primary_interval: str = "5m",
+) -> Dict:
+    """5m/15m/60m alignment from one 5m bar series (resampled), or Yahoo limits for non-5m."""
+    if primary_df is not None and not primary_df.empty and primary_interval == "5m":
+        tf5 = primary_df
+        tf15 = resample_ohlcv(tf5, "15min")
+        tf60 = resample_ohlcv(tf5, "60min")
+    elif primary_interval == "5m":
+        tf5 = download_history(
+            symbol,
+            period=max_yahoo_period_for_interval("5m"),
+            interval="5m",
+            include_prepost=include_prepost,
+        )
+        tf15 = resample_ohlcv(tf5, "15min")
+        tf60 = resample_ohlcv(tf5, "60min")
+    else:
+        tf5 = download_history(symbol, period="1d", interval="5m", include_prepost=include_prepost)
+        tf15 = download_history(symbol, period="5d", interval="15m", include_prepost=include_prepost)
+        tf60 = download_history(symbol, period="1mo", interval="60m", include_prepost=include_prepost)
 
     def bias(df: pd.DataFrame) -> int:
         if df.empty or len(df) < 30:
@@ -179,7 +205,11 @@ def build_trade_plan(signal: str, price: float, atr_value: float, levels: Dict) 
 
 def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict, mode: str = DEFAULT_SCAN_MODE) -> Dict:
     if df.empty or len(df) < 3:
-        return {"ready": False, "trigger_text": "insufficient trigger data"}
+        return {
+            "ready": False,
+            "trigger_text": "insufficient trigger data",
+            "trigger_detail": "Need at least 3 bars to evaluate breakout trigger.",
+        }
 
     mode_config = _get_mode_config(mode)
     last = df.iloc[-1]
@@ -196,31 +226,65 @@ def entry_trigger(signal: str, df: pd.DataFrame, levels: Dict, mode: str = DEFAU
     breakout_buffer = max(close_price * mode_config["breakout_buffer_pct"], atr_value * 0.1)
     prev_high = levels.get("prev_high", np.nan)
     prev_low = levels.get("prev_low", np.nan)
+    min_rv = float(mode_config["min_trigger_relvol"])
+    min_cs = float(mode_config["close_strength_min"])
 
     if signal == "LONG":
         threshold = max(float(prev["High"]), float(prev_high) if pd.notna(prev_high) else float(prev["High"])) + breakout_buffer
-        ready = bool(
-            last["Close"] > last["VWAP"]
-            and close_price >= threshold
-            and high_price >= threshold
-            and relvol >= mode_config["min_trigger_relvol"]
-            and close_price > open_price
-            and close_strength >= mode_config["close_strength_min"]
-        )
+        c_vwap = bool(last["Close"] > last["VWAP"])
+        c_close = close_price >= threshold
+        c_high = high_price >= threshold
+        c_rv = relvol >= min_rv
+        c_candle = close_price > open_price
+        c_str = close_strength >= min_cs
+        ready = bool(c_vwap and c_close and c_high and c_rv and c_candle and c_str)
         text = f"LONG ready above {threshold:.4f}" if ready else "long not ready"
+        if not ready:
+            missing = []
+            if not c_vwap:
+                missing.append("close not above VWAP (need bullish side vs VWAP)")
+            if not c_close:
+                missing.append(f"close below breakout level {threshold:.4f} (need close ≥ level + buffer)")
+            if not c_high:
+                missing.append(f"high did not clear {threshold:.4f}")
+            if not c_rv:
+                missing.append(f"RelVol {relvol:.2f} < trigger min {min_rv} (needs stronger vs 20-bar avg volume)")
+            if not c_candle:
+                missing.append("need bullish candle (close > open)")
+            if not c_str:
+                missing.append(f"close strength {close_strength:.2f} < min {min_cs} (weak close in bar range)")
+            detail = "Not READY — " + "; ".join(missing)
+        else:
+            detail = f"READY — long breakout: close/high ≥ {threshold:.4f}, VWAP OK, RelVol {relvol:.2f} ≥ {min_rv}."
     else:
         threshold = min(float(prev["Low"]), float(prev_low) if pd.notna(prev_low) else float(prev["Low"])) - breakout_buffer
-        ready = bool(
-            last["Close"] < last["VWAP"]
-            and close_price <= threshold
-            and low_price <= threshold
-            and relvol >= mode_config["min_trigger_relvol"]
-            and close_price < open_price
-            and breakdown_strength >= mode_config["close_strength_min"]
-        )
+        c_vwap = bool(last["Close"] < last["VWAP"])
+        c_close = close_price <= threshold
+        c_low = low_price <= threshold
+        c_rv = relvol >= min_rv
+        c_candle = close_price < open_price
+        c_str = breakdown_strength >= min_cs
+        ready = bool(c_vwap and c_close and c_low and c_rv and c_candle and c_str)
         text = f"SHORT ready below {threshold:.4f}" if ready else "short not ready"
+        if not ready:
+            missing = []
+            if not c_vwap:
+                missing.append("close not below VWAP (need bearish side vs VWAP)")
+            if not c_close:
+                missing.append(f"close above breakdown level {threshold:.4f} (need close ≤ level − buffer)")
+            if not c_low:
+                missing.append(f"low did not reach {threshold:.4f}")
+            if not c_rv:
+                missing.append(f"RelVol {relvol:.2f} < trigger min {min_rv} (needs stronger vs 20-bar avg volume)")
+            if not c_candle:
+                missing.append("need bearish candle (close < open)")
+            if not c_str:
+                missing.append(f"breakdown strength {breakdown_strength:.2f} < min {min_cs} (weak close in bar range)")
+            detail = "Not READY — " + "; ".join(missing)
+        else:
+            detail = f"READY — short breakdown: close/low ≤ {threshold:.4f}, VWAP OK, RelVol {relvol:.2f} ≥ {min_rv}."
 
-    return {"ready": ready, "trigger_text": text}
+    return {"ready": ready, "trigger_text": text, "trigger_detail": detail}
 
 
 def _quality_score(
@@ -253,16 +317,6 @@ def _quality_score(
     score += int(liquidity_label == "HIGH")
     score -= int(event_risk == "MEDIUM")
     return max(score, 0)
-
-
-def _history_period_for_interval(interval: str) -> str:
-    if interval == "1m":
-        return "7d"
-    if interval in {"2m", "5m", "15m", "30m"}:
-        return "2mo"
-    if interval == "60m":
-        return "3mo"
-    return "6mo"
 
 
 def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: bool, regime: Dict, mode: str = DEFAULT_SCAN_MODE) -> Dict:
@@ -298,7 +352,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     near_low = dist_low_pct <= 0.8 if pd.notna(dist_low_pct) else False
     spread_proxy = float(latest["SpreadProxyPct"]) if pd.notna(latest["SpreadProxyPct"]) else np.nan
     levels = support_resistance(df)
-    mtf = mtf_confirmation(symbol, include_prepost=include_prepost)
+    mtf = mtf_confirmation(symbol, include_prepost=include_prepost, primary_df=raw, primary_interval=interval)
     intel = get_symbol_intel(symbol, df=df, price_hint=price)
     blocked_status = None
     if mode_config["hard_block_choppy"] and regime["overall"] == "CHOPPY":
@@ -484,6 +538,7 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         "regime": regime["overall"],
         "trigger_ready": trigger["ready"],
         "trigger_text": trigger["trigger_text"],
+        "trigger_detail": trigger.get("trigger_detail", ""),
         "entry": plan["entry"],
         "stop": plan["stop"],
         "target1": plan["target1"],
@@ -608,6 +663,24 @@ def backtest_symbol(symbol: str, include_prepost: bool) -> Dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _readiness_indicator_frame(
+    symbol: str,
+    interval: str,
+    include_prepost: bool,
+) -> pd.DataFrame:
+    """Single Yahoo pull + indicators; shared by timeline and trade audit (no duplicate downloads)."""
+    history_period = max_yahoo_period_for_interval(interval)
+    raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
+    if raw.empty or len(raw) < 32:
+        return pd.DataFrame()
+
+    df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
+    if df.empty or len(df) < 32:
+        return pd.DataFrame()
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_readiness_timeline(
     symbol: str,
     interval: str,
@@ -615,13 +688,8 @@ def get_readiness_timeline(
     lookback_hours: int = READINESS_LOOKBACK_HOURS,
     mode: str = DEFAULT_HISTORY_MODE,
 ) -> pd.DataFrame:
-    history_period = _history_period_for_interval(interval)
-    raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
-    if raw.empty or len(raw) < 32:
-        return pd.DataFrame()
-
-    df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
-    if df.empty or len(df) < 32:
+    df = _readiness_indicator_frame(symbol, interval, include_prepost)
+    if df.empty:
         return pd.DataFrame()
 
     cutoff = pd.Timestamp(df.index[-1]) - pd.Timedelta(hours=lookback_hours)
@@ -848,13 +916,8 @@ def get_readiness_trade_audit(
     lookback_hours: int = READINESS_LOOKBACK_HOURS,
     mode: str = DEFAULT_HISTORY_MODE,
 ) -> pd.DataFrame:
-    history_period = _history_period_for_interval(interval)
-    raw = download_history(symbol, period=history_period, interval=interval, include_prepost=include_prepost)
-    if raw.empty or len(raw) < 32:
-        return pd.DataFrame()
-
-    df = add_indicators(raw.dropna(subset=["Open", "High", "Low", "Close"])).copy()
-    if df.empty or len(df) < 32:
+    df = _readiness_indicator_frame(symbol, interval, include_prepost)
+    if df.empty:
         return pd.DataFrame()
 
     last_ts = pd.Timestamp(df.index[-1])

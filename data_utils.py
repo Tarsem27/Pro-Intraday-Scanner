@@ -9,6 +9,65 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+# Yahoo Finance (via yfinance) intraday limits — request at most this much history
+# in one call so we do not rely on retries or partial failures. (Approximate; see yfinance docs.)
+_YAHOO_MAX_PERIOD_BY_INTERVAL: Dict[str, str] = {
+    "1m": "7d",
+    "2m": "59d",
+    "3m": "59d",
+    "5m": "59d",
+    "15m": "59d",
+    "30m": "59d",
+    "60m": "730d",
+    "90m": "730d",
+    "1h": "730d",
+}
+
+
+def _period_to_days_approx(period: str) -> float:
+    p = (period or "1mo").strip().lower()
+    if p in ("ytd", "max"):
+        return 3650.0
+    if p.endswith("d"):
+        return float(p[:-1] or 1)
+    if p.endswith("mo"):
+        return float(p[:-2] or 1) * 30.0
+    if p.endswith("y"):
+        return float(p[:-1] or 1) * 365.0
+    return 30.0
+
+
+def max_yahoo_period_for_interval(interval: str) -> str:
+    """Longest history Yahoo reliably serves for this bar size (one-shot request)."""
+    return _YAHOO_MAX_PERIOD_BY_INTERVAL.get(interval, "2y")
+
+
+def clamp_yahoo_period(period: str, interval: str) -> str:
+    """Use the shorter of the requested window and Yahoo's cap for this interval."""
+    cap = max_yahoo_period_for_interval(interval)
+    if _period_to_days_approx(period) <= _period_to_days_approx(cap):
+        return period
+    return cap
+
+
+def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Build higher timeframe bars from intraday OHLCV (one local transform, no extra Yahoo calls)."""
+    if df.empty:
+        return df
+    need = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    if not need:
+        return pd.DataFrame(index=df.index)
+    agg = {
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    }
+    sub = df[need].copy()
+    out = sub.resample(rule).agg({k: agg[k] for k in need if k in agg}).dropna(how="all")
+    return out
+
 
 def _coerce_numeric_series(df: pd.DataFrame, column: str, default: float = np.nan) -> pd.Series:
     if column not in df.columns:
@@ -130,6 +189,8 @@ def parse_symbol_input(raw: str) -> List[str]:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def download_history(symbol: str, period: str, interval: str, include_prepost: bool) -> pd.DataFrame:
+    """One Yahoo request per call — period is clamped to provider limits (no retry loop)."""
+    period = clamp_yahoo_period(period, interval)
     try:
         df = yf.download(
             tickers=symbol,
@@ -140,8 +201,11 @@ def download_history(symbol: str, period: str, interval: str, include_prepost: b
             prepost=include_prepost,
             threads=False,
         )
-        if df is None or df.empty:
-            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    try:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0] for c in df.columns]
         df = df.rename(columns=str.title)

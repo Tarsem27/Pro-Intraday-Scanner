@@ -4,6 +4,11 @@
 # ==============================
 from typing import Dict, List
 
+# Yahoo Finance: single request per symbol (no sidebar tuning). Intraday must stay within provider limits.
+SCAN_PERIOD = "5d"
+SCAN_INTERVAL = "5m"
+INCLUDE_PREPOST_DEFAULT = True
+
 DEFAULT_UNIVERSES: Dict[str, List[str]] = {
     "US Mega Caps": [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "PLTR",

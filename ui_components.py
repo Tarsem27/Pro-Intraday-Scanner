@@ -178,6 +178,10 @@ Regime: **{selected['regime']}**"""
             st.markdown("**Reasoning**")
             st.write(selected["reasons"])
             st.caption(f"Trigger: {selected['trigger_text']}")
+            td = selected.get("trigger_detail") or ""
+            if td:
+                with st.expander("Why WAIT / what READY needs (this bar)", expanded=False):
+                    st.write(td)
             st.caption(f"Catalyst: {selected['catalyst']}")
     with lower_right:
         with st.container(border=True):
