@@ -527,7 +527,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         )
 
     if timeline.empty:
-        st.info(f"Not enough recent bar data to build a {lookback_lbl} readiness history for this symbol.")
+        st.info(f"Not enough recent bar data to build a readiness history for the last {lookback_lbl} for this symbol.")
         return
 
     summaries = {side: summarize_recent_readiness(timeline, side) for side in ["LONG", "SHORT"]}
@@ -653,6 +653,21 @@ def render_recent_ready_assets_section(symbols: List[str], interval: str, includ
 
     if ready_assets.empty:
         st.info(f"No scanned symbols showed a recorded `READY` event in the last {lookback_lbl} at the current interval.")
+        st.markdown(
+            """
+**This is usually not a single “broken feed” — it is often a mix of data limits and strict rules:**
+
+1. **Source (Yahoo Finance via `yfinance`)** — Free/delayed data, occasional gaps, and **1m** history is shorter and patchier than **5m/15m**. Symbols can fail the minimum bar count (`35+` bars) and be skipped quietly.
+
+2. **What counts as `READY` here** — The history list only marks bars that pass the **full trigger** (break of prior high/low, VWAP side, relative volume, directional close, etc.) on **that bar interval**, inside the **last 48 hours**. The main scan can still show a symbol as interesting without any bar in that window counting as `READY`.
+
+3. **Time and liquidity** — Outside regular session, on very quiet days, or with a small symbol list, it is normal to see **zero** qualifying bars in 48 hours.
+
+**Things to try:** use **5m** or **15m**, scan more **liquid** names (mega caps / ETFs), run during **US cash session**, and confirm **Exploratory** history mode. Fallbacks were tried across: `"""
+            + ", ".join(resolved.get("attempted", [])[:12])
+            + ("…" if len(resolved.get("attempted", [])) > 12 else "")
+            + "`."
+        )
         return ready_assets
 
     display = ready_assets.copy()
