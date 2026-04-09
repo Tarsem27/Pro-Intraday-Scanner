@@ -15,6 +15,7 @@ from data_utils import (
     normalize_score,
     resample_ohlcv,
 )
+from config import RECENT_READY_MAX_SYMBOLS
 from market_intel import get_symbol_intel
 
 
@@ -789,7 +790,8 @@ def get_recent_ready_assets(
     mode: str = DEFAULT_HISTORY_MODE,
 ) -> pd.DataFrame:
     rows = []
-    for symbol in symbols:
+    symbols_limited = list(symbols)[:RECENT_READY_MAX_SYMBOLS]
+    for symbol in symbols_limited:
         timeline = get_readiness_timeline(
             symbol,
             interval=interval,
