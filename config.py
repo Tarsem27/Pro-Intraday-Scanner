@@ -9,6 +9,9 @@ SCAN_PERIOD = "5d"
 SCAN_INTERVAL = "5m"
 INCLUDE_PREPOST_DEFAULT = True
 
+# Cross-symbol "recent READY" table: each symbol runs a full bar-by-bar timeline (CPU-heavy).
+RECENT_READY_MAX_SYMBOLS = 12
+
 DEFAULT_UNIVERSES: Dict[str, List[str]] = {
     "US Mega Caps": [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "PLTR",
