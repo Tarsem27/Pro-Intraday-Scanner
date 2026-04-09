@@ -202,6 +202,61 @@ def render_beginner_guide():
             )
 
 
+def render_htf_ltf_workflow_note():
+    with st.expander("HTF / LTF workflow (common SMC-style teaching)"):
+        st.markdown(
+            """
+            Many educators describe a **3-step** rhythm: establish bias on a higher timeframe, confirm on a lower timeframe, then execute with defined risk.
+
+            **1. Range (higher timeframe)**  
+            Use a slower chart (for example **15m**) to see who is in control, where structure breaks, and where imbalances (*fair value gaps*) may attract price. This app’s **multi-timeframe state**, **VWAP**, and **support/resistance** are in that spirit, but it does **not** auto-detect BOS, CHoCH, or FVG.
+
+            **2. Change (lower timeframe)**  
+            Drop to a faster chart (for example **1m** or **5m**) for confirmation and to avoid chop. Here, **trigger-ready**, **relative volume**, and **quality score** play a similar confirmation role. **1m** history from the data provider is short—if sections below look empty, try **5m** or **15m**.
+
+            **3. Execution**  
+            Use the printed **entry**, **stop**, **target**, and **R:R**. Treat **high-impact news** as a reason to stand aside. Expectancy comes from repeating the process over many trades, not from any single alert.
+
+            **Psychology**  
+            Keep per-trade expectations modest; edge shows up over a **sample of trades**, not in every signal.
+            """
+        )
+
+
+def render_best_profit_scan_table(scan_df: pd.DataFrame):
+    st.subheader("Best profit setups (this scan)")
+    st.caption(
+        "Highest-ranked names from the latest run: trigger-ready first, then quality, conviction, and planned R:R (`rr1`). "
+        "This reflects the scanner’s *current* edge estimate — not audited past P/L."
+    )
+    if scan_df.empty:
+        st.caption("Run a scan to populate this table.")
+        return
+    ok = scan_df[scan_df["status"].eq("ok")].copy() if "status" in scan_df.columns else scan_df.copy()
+    if ok.empty:
+        st.info("No passing setups in the last scan. Try Exploratory mode or a different universe.")
+        return
+    ok["rr1_num"] = pd.to_numeric(ok["rr1"], errors="coerce")
+    ok = ok.sort_values(
+        ["trigger_ready", "quality_score", "conviction", "rr1_num"],
+        ascending=[False, False, False, False],
+    )
+    show_cols = [
+        "symbol",
+        "signal",
+        "trigger_ready",
+        "quality_score",
+        "conviction",
+        "rr1",
+        "entry",
+        "stop",
+        "target1",
+        "change_pct",
+    ]
+    show_cols = [c for c in show_cols if c in ok.columns]
+    st.dataframe(ok[show_cols].head(12), use_container_width=True, hide_index=True)
+
+
 def _format_duration(delta: pd.Timedelta | None) -> str:
     if delta is None or pd.isna(delta):
         return "N/A"
@@ -315,19 +370,32 @@ def _resolve_recent_ready_assets(symbols: List[str], interval: str, include_prep
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_portfolio_trade_audit(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
+    """Merge per-symbol readiness audits. Tries fallback bar sizes/modes when the primary history is empty (same idea as signal timing)."""
     audit_frames = []
     for symbol in symbols:
-        symbol_audit = get_readiness_trade_audit(
-            symbol,
-            interval=interval,
-            include_prepost=include_prepost,
-            lookback_hours=READINESS_LOOKBACK_HOURS,
-            mode=history_mode,
-        )
+        symbol_audit = pd.DataFrame()
+        used_interval = interval
+        used_mode = history_mode
+        for candidate_interval in _history_interval_candidates(interval):
+            for candidate_mode in _history_mode_candidates(history_mode):
+                symbol_audit = get_readiness_trade_audit(
+                    symbol,
+                    interval=candidate_interval,
+                    include_prepost=include_prepost,
+                    lookback_hours=READINESS_LOOKBACK_HOURS,
+                    mode=candidate_mode,
+                )
+                if not symbol_audit.empty:
+                    used_interval, used_mode = candidate_interval, candidate_mode
+                    break
+            if not symbol_audit.empty:
+                break
         if symbol_audit.empty:
             continue
         enriched = symbol_audit.copy()
         enriched["symbol"] = symbol
+        enriched["audit_interval"] = used_interval
+        enriched["audit_mode"] = used_mode
         audit_frames.append(enriched)
 
     if not audit_frames:
@@ -337,10 +405,12 @@ def get_portfolio_trade_audit(symbols: List[str], interval: str, include_prepost
 
 
 def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, include_prepost: bool, history_mode: str):
+    render_best_profit_scan_table(all_results)
+
     st.subheader("Profitable Traits")
     st.caption(
-        "Tracks what has actually been making money lately across the scanned symbols, "
-        "using the same readiness audit engine that powers the timing section."
+        "Tracks simulated outcomes for past `READY` windows (stop vs Target 1 vs end of history) across scanned symbols, "
+        "using the same readiness audit as Signal timing. Empty results usually mean sparse data at your bar size — try **5m**/**15m** or **Exploratory** history mode."
     )
 
     if all_results.empty:
@@ -349,12 +419,25 @@ def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, i
 
     audit_df = get_portfolio_trade_audit(all_results["symbol"].dropna().tolist(), interval=interval, include_prepost=include_prepost, history_mode=history_mode)
     if audit_df.empty:
-        st.info("No audited trades were available across the latest scanned symbols.")
+        st.info(
+            "No audited trades were available for these symbols. "
+            "The engine needs enough bars and at least one closed `READY` window with forward bars. "
+            "Try **5m** or **15m** interval, **Exploratory** history mode, or fewer symbols if downloads are failing."
+        )
         return
+
+    if "audit_interval" in audit_df.columns and (audit_df["audit_interval"] != interval).any():
+        alt = audit_df["audit_interval"].mode()
+        st.caption(
+            f"Some audits used fallback bar sizes (for example `{alt.iloc[0] if len(alt) else '?'}`) because the primary interval produced no scored history."
+        )
 
     completed = audit_df[audit_df["outcome_status"] != "no_follow_through"].copy()
     if completed.empty:
-        st.info("Audits were found, but none had enough follow-through yet to score as wins or losses.")
+        st.info(
+            "Audits were found, but every row was still `no_follow_through` (no forward bars after the signal). "
+            "Switch to **5m** or **15m** in the sidebar so the provider returns enough history to score outcomes."
+        )
         return
 
     total_trades = len(completed)
@@ -728,6 +811,7 @@ with st.expander("How to use this tool"):
     st.caption("Telegram alerts: store `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally `TELEGRAM_ALERTS_ENABLED=true` in environment variables or Streamlit secrets.")
 
 render_beginner_guide()
+render_htf_ltf_workflow_note()
 render_telegram_diagnostics()
 
 regime = detect_market_regime()
