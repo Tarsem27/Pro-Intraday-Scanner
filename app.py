@@ -223,6 +223,51 @@ def render_htf_ltf_workflow_note():
         )
 
 
+def render_scan_outcome_diagnostics(scan_df: pd.DataFrame, period: str, interval: str) -> None:
+    """Help distinguish Yahoo bar shortages from scanner rule rejections."""
+    with st.expander("Diagnostics: data vs filters", expanded=False):
+        st.caption(
+            f"Scan uses **period={period}**, **interval={interval}**. "
+            "Compare **insufficient_data** (download / too few bars for indicators) with other rows (blocked by scanner rules). "
+            "Symbols with **ok** still show **WAIT** if the trigger (breakout + volume + candle) is not met."
+        )
+        if scan_df.empty:
+            st.caption("No scan loaded.")
+            return
+        col = "scanner_status" if "scanner_status" in scan_df.columns else "status"
+        if col not in scan_df.columns:
+            st.caption("No status column in results.")
+            return
+        s = scan_df[col].fillna("unknown").astype(str)
+        vc = s.value_counts().rename_axis("outcome").reset_index(name="count").sort_values("count", ascending=False)
+        st.dataframe(vc, use_container_width=True, hide_index=True)
+
+        n = len(scan_df)
+        n_data = int((s == "insufficient_data").sum())
+        n_ok = int((s == "ok").sum())
+        n_rules = int(((s != "ok") & (s != "insufficient_data")).sum())
+
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.metric("Symbols scanned", n)
+        with d2:
+            st.metric("Insufficient bars (data)", n_data)
+        with d3:
+            st.metric("Passed filters (ok)", n_ok)
+        with d4:
+            st.metric("Blocked by rules", n_rules)
+
+        bad = scan_df.loc[s == "insufficient_data", "symbol"].dropna().astype(str).head(20).tolist()
+        if bad:
+            st.caption("Symbols with **insufficient_data** (first 20): " + ", ".join(bad))
+
+        st.markdown(
+            "**How to read this:** If **Insufficient bars** is high, raise **lookback period** (e.g. `5d`), "
+            "use **5m/15m** instead of **1m**, or check the network / Yahoo. "
+            "If **Blocked by rules** is high while data is ok, loosen **Scanner mode** or inspect the **Reasoning** column for each block."
+        )
+
+
 def render_best_profit_scan_table(scan_df: pd.DataFrame):
     st.subheader("Best profit setups (this scan)")
     st.caption(
@@ -884,8 +929,12 @@ if not all_results.empty:
             all_results[column] = default_value
     all_results["accepted"] = True
     all_results["acceptance_status"] = "ok"
-    all_results["qualified"] = True
-    all_results["status"] = all_results.get("scanner_status", all_results["status"])
+    if "scanner_status" in all_results.columns:
+        all_results["status"] = all_results["scanner_status"]
+        all_results["qualified"] = all_results["scanner_status"].eq("ok")
+        all_results["scanner_qualified"] = all_results["scanner_status"].eq("ok")
+    elif "status" in all_results.columns:
+        all_results["qualified"] = all_results["status"].eq("ok")
     st.session_state.last_all_scan = all_results
 results = all_results.copy() if not all_results.empty else pd.DataFrame()
 st.session_state.last_scan = results
@@ -912,6 +961,8 @@ with m3:
     render_metric_card("Trigger-ready", str(ready_count))
 with m4:
     render_metric_card("Watchlist", str(len(st.session_state.watchlist)))
+
+render_scan_outcome_diagnostics(results, period=period, interval=interval)
 
 if all_results.empty:
     st.warning("No scan results yet. Either the market is dead, the data provider returned nothing, or the chosen symbols are not moving.")
