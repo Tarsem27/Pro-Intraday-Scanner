@@ -21,40 +21,43 @@ MIN_VWAP_DISTANCE_PCT = 0.15
 MIN_QUALITY_SCORE = 4
 BREAKOUT_BUFFER_PCT = 0.0007
 STOP_BUFFER_PCT = 0.001
-DEFAULT_SCAN_MODE = "Balanced"
+DEFAULT_SCAN_MODE = "Exploratory"
 DEFAULT_HISTORY_MODE = "Exploratory"
 SCANNER_MODES = {
     "Exploratory": {
-        "rsi_neutral_low": 48,
-        "rsi_neutral_high": 52,
-        "min_setup_relvol": 0.6,
-        "min_trigger_relvol": 1.0,
-        "min_vwap_distance_pct": 0.03,
-        "min_quality_score": 2,
-        "breakout_buffer_pct": 0.0003,
-        "close_strength_min": 0.45,
-        "quality_relvol_threshold": 1.0,
-        "quality_vwap_distance_pct": 0.08,
+        "rsi_neutral_low": RSI_NEUTRAL_LOW,
+        "rsi_neutral_high": RSI_NEUTRAL_HIGH,
+        "block_neutral_rsi": False,
+        "min_setup_relvol": 0.45,
+        "min_trigger_relvol": 0.85,
+        "min_vwap_distance_pct": 0.012,
+        "min_quality_score": 0,
+        "breakout_buffer_pct": 0.0002,
+        "close_strength_min": 0.38,
+        "quality_relvol_threshold": 0.85,
+        "quality_vwap_distance_pct": 0.04,
         "hard_block_choppy": False,
         "hard_block_high_event": False,
     },
     "Balanced": {
-        "rsi_neutral_low": 47,
-        "rsi_neutral_high": 53,
-        "min_setup_relvol": 0.8,
-        "min_trigger_relvol": 1.15,
-        "min_vwap_distance_pct": 0.08,
-        "min_quality_score": 3,
-        "breakout_buffer_pct": 0.0005,
-        "close_strength_min": 0.55,
-        "quality_relvol_threshold": 1.1,
-        "quality_vwap_distance_pct": 0.12,
+        "rsi_neutral_low": 48,
+        "rsi_neutral_high": 52,
+        "block_neutral_rsi": True,
+        "min_setup_relvol": 0.65,
+        "min_trigger_relvol": 1.05,
+        "min_vwap_distance_pct": 0.05,
+        "min_quality_score": 2,
+        "breakout_buffer_pct": 0.00045,
+        "close_strength_min": 0.5,
+        "quality_relvol_threshold": 1.0,
+        "quality_vwap_distance_pct": 0.1,
         "hard_block_choppy": False,
         "hard_block_high_event": False,
     },
     "Strict": {
         "rsi_neutral_low": RSI_NEUTRAL_LOW,
         "rsi_neutral_high": RSI_NEUTRAL_HIGH,
+        "block_neutral_rsi": True,
         "min_setup_relvol": MIN_SETUP_RELVOL,
         "min_trigger_relvol": MIN_TRIGGER_RELVOL,
         "min_vwap_distance_pct": MIN_VWAP_DISTANCE_PCT,
@@ -284,7 +287,11 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
         blocked_status = "event_blocked"
     elif relvol < mode_config["min_setup_relvol"]:
         blocked_status = "low_volume"
-    elif pd.notna(rsi_now) and mode_config["rsi_neutral_low"] < rsi_now < mode_config["rsi_neutral_high"]:
+    elif (
+        mode_config.get("block_neutral_rsi", True)
+        and pd.notna(rsi_now)
+        and mode_config["rsi_neutral_low"] < rsi_now < mode_config["rsi_neutral_high"]
+    ):
         blocked_status = "neutral_rsi"
     elif pd.notna(vwap_distance_pct) and vwap_distance_pct < mode_config["min_vwap_distance_pct"]:
         blocked_status = "vwap_indecision"
