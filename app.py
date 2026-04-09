@@ -13,6 +13,7 @@ from config import (
     DEFAULT_CUSTOM_SYMBOLS,
     DEFAULT_UNIVERSES,
     INCLUDE_PREPOST_DEFAULT,
+    RECENT_READY_MAX_SYMBOLS,
     SCAN_INTERVAL,
     SCAN_PERIOD,
 )
@@ -1053,13 +1054,32 @@ inspect_pool = all_results[all_results["chart"].notna()].copy() if "chart" in al
 if inspect_pool.empty:
     st.info("No chart-capable symbols are available from the latest scan.")
     st.stop()
-recent_ready_assets = render_recent_ready_assets_section(
-    inspect_pool["symbol"].tolist(),
-    interval=interval,
-    include_prepost=include_prepost,
-    history_mode=history_mode,
-)
 inspect_symbols = inspect_pool["symbol"].tolist()
+load_cross_symbol_ready = st.checkbox(
+    "Load cross-symbol readiness table (slow: runs a full timeline per symbol)",
+    value=False,
+    key="setup_load_cross_symbol_ready",
+    help=(
+        "When off (default), only the selected symbol’s chart and signal timing load here—fast. "
+        f"When on, the table below scans up to {RECENT_READY_MAX_SYMBOLS} symbols for recent READY events (CPU-heavy, not Yahoo retries)."
+    ),
+)
+if load_cross_symbol_ready:
+    if len(inspect_symbols) > RECENT_READY_MAX_SYMBOLS:
+        st.caption(
+            f"Cross-symbol table uses the first **{RECENT_READY_MAX_SYMBOLS}** scan symbols (see `RECENT_READY_MAX_SYMBOLS` in `config.py`)."
+        )
+    recent_ready_assets = render_recent_ready_assets_section(
+        inspect_symbols,
+        interval=interval,
+        include_prepost=include_prepost,
+        history_mode=history_mode,
+    )
+else:
+    st.caption(
+        f"Cross-symbol readiness is **skipped** for speed. Turn on the checkbox above to build the table (max **{RECENT_READY_MAX_SYMBOLS}** symbols)."
+    )
+    recent_ready_assets = pd.DataFrame()
 default_symbol = recent_ready_assets.iloc[0]["symbol"] if not recent_ready_assets.empty else inspect_symbols[0]
 default_index = inspect_symbols.index(default_symbol) if default_symbol in inspect_symbols else 0
 selected_symbol = st.selectbox("Choose symbol", inspect_symbols, index=default_index, key="detail_symbol")
