@@ -66,7 +66,7 @@ SCANNER_MODES = {
         "close_strength_min": 0.6,
         "quality_relvol_threshold": 1.2,
         "quality_vwap_distance_pct": 0.2,
-        "hard_block_choppy": True,
+        "hard_block_choppy": False,
         "hard_block_high_event": True,
     },
 }
@@ -354,9 +354,6 @@ def analyze_symbol(symbol: str, period: str, interval: str, include_prepost: boo
     elif regime["overall"] == "RISK-OFF TREND DOWN":
         short_score += 8
         long_score -= 4
-    elif regime["overall"] == "CHOPPY":
-        long_score -= 5
-        short_score -= 5
 
     if pd.notna(spread_proxy) and spread_proxy > 1.8:
         long_score -= 8
