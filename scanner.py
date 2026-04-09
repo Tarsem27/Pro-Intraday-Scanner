@@ -12,7 +12,7 @@ from data_utils import add_indicators, download_history, normalize_score
 from market_intel import get_symbol_intel
 
 
-READINESS_LOOKBACK_HOURS = 24 * 30
+READINESS_LOOKBACK_HOURS = 48
 RSI_NEUTRAL_LOW = 45
 RSI_NEUTRAL_HIGH = 55
 MIN_SETUP_RELVOL = 0.9
