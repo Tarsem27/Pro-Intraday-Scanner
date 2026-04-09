@@ -892,24 +892,25 @@ def get_readiness_trade_audit(
                     stop = float(start_row[stop_col])
                     target1 = float(start_row[target_col])
                     evaluation = _evaluate_readiness_trade(side, future_df, entry, stop, target1)
-                    audits.append(
-                        {
-                            "side": side,
-                            "started": start_ts,
-                            "ended": evaluation["exit_timestamp"],
-                            "readiness_ended": end_ts,
-                            "window_duration": end_ts - start_ts,
-                            "entry": round(entry, 4),
-                            "stop": round(stop, 4),
-                            "target1": round(target1, 4),
-                            "suggested_profit": round(abs(target1 - entry), 4),
-                            "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
-                            "suggested_loss": round(abs(entry - stop), 4),
-                            "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
-                            "rr1": start_row[rr_col],
-                            **evaluation,
-                        }
-                    )
+                    if evaluation["outcome_status"] != "no_follow_through":
+                        audits.append(
+                            {
+                                "side": side,
+                                "started": start_ts,
+                                "ended": evaluation["exit_timestamp"],
+                                "readiness_ended": end_ts,
+                                "window_duration": end_ts - start_ts,
+                                "entry": round(entry, 4),
+                                "stop": round(stop, 4),
+                                "target1": round(target1, 4),
+                                "suggested_profit": round(abs(target1 - entry), 4),
+                                "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
+                                "suggested_loss": round(abs(entry - stop), 4),
+                                "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
+                                "rr1": start_row[rr_col],
+                                **evaluation,
+                            }
+                        )
                 active_start_idx = None
             previous_ready = ready
 
@@ -922,24 +923,25 @@ def get_readiness_trade_audit(
                 stop = float(start_row[stop_col])
                 target1 = float(start_row[target_col])
                 evaluation = _evaluate_readiness_trade(side, future_df, entry, stop, target1)
-                audits.append(
-                    {
-                        "side": side,
-                        "started": start_ts,
-                        "ended": evaluation["exit_timestamp"],
-                        "readiness_ended": last_ts,
-                        "window_duration": last_ts - start_ts,
-                        "entry": round(entry, 4),
-                        "stop": round(stop, 4),
-                        "target1": round(target1, 4),
-                        "suggested_profit": round(abs(target1 - entry), 4),
-                        "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
-                        "suggested_loss": round(abs(entry - stop), 4),
-                        "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
-                        "rr1": start_row[rr_col],
-                        **evaluation,
-                    }
-                )
+                if evaluation["outcome_status"] != "no_follow_through":
+                    audits.append(
+                        {
+                            "side": side,
+                            "started": start_ts,
+                            "ended": evaluation["exit_timestamp"],
+                            "readiness_ended": last_ts,
+                            "window_duration": last_ts - start_ts,
+                            "entry": round(entry, 4),
+                            "stop": round(stop, 4),
+                            "target1": round(target1, 4),
+                            "suggested_profit": round(abs(target1 - entry), 4),
+                            "suggested_profit_pct": round(abs(target1 - entry) / entry * 100, 2) if entry else np.nan,
+                            "suggested_loss": round(abs(entry - stop), 4),
+                            "suggested_loss_pct": round(abs(entry - stop) / entry * 100, 2) if entry else np.nan,
+                            "rr1": start_row[rr_col],
+                            **evaluation,
+                        }
+                    )
 
     if not audits:
         return pd.DataFrame()
