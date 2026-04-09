@@ -280,6 +280,11 @@ def _format_melbourne_time(value) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def _readiness_lookback_label() -> str:
+    h = READINESS_LOOKBACK_HOURS
+    return f"{h} hours" if h != 1 else "1 hour"
+
+
 def _history_interval_candidates(interval: str) -> List[str]:
     fallback_map = {
         "1m": ["1m", "5m", "15m", "30m"],
@@ -505,13 +510,13 @@ def render_profitable_traits_section(all_results: pd.DataFrame, interval: str, i
 
 
 def render_signal_timing_section(symbol: str, interval: str, include_prepost: bool, history_mode: str):
-    lookback_days = READINESS_LOOKBACK_HOURS // 24
+    lookback_lbl = _readiness_lookback_label()
     resolved = _resolve_signal_timing_data(symbol, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
     timeline = resolved["timeline"]
     audit_df = resolved["audit_df"]
     st.subheader("Signal timing")
     st.caption(
-        f"Shows when this symbol was `READY` to buy or sell over the last {lookback_days} days "
+        f"Shows when this symbol was `READY` to buy or sell over the last {lookback_lbl} "
         f"based on recent market bars using `{history_mode}` history rules. All times below are in Melbourne time."
     )
 
@@ -522,7 +527,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
         )
 
     if timeline.empty:
-        st.info(f"Not enough recent bar data to build a {lookback_days}-day readiness history for this symbol.")
+        st.info(f"Not enough recent bar data to build a {lookback_lbl} readiness history for this symbol.")
         return
 
     summaries = {side: summarize_recent_readiness(timeline, side) for side in ["LONG", "SHORT"]}
@@ -547,7 +552,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
                 f"to {_format_melbourne_time(last_ended)}"
             )
         else:
-            status_text = f"No ready signal seen in the last {lookback_days}d"
+            status_text = f"No ready signal seen in the last {lookback_lbl}"
             window_text = "Last ready window: N/A"
 
         with cols[idx]:
@@ -578,7 +583,7 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
     st.caption("Assumption: entry at the ready bar, planned profit uses `Target 1`, planned risk uses `Stop`, and the audit keeps the trade alive until `Target 1`, `Stop`, or the end of the available bar history.")
 
     if audit_df.empty:
-        st.info(f"No recent ready events with enough follow-through data were found for audit over the last {lookback_days} days.")
+        st.info(f"No recent ready events with enough follow-through data were found for audit over the last {lookback_lbl}.")
         return
 
     recent_audit = audit_df.head(10).copy()
@@ -626,10 +631,10 @@ def render_signal_timing_section(symbol: str, interval: str, include_prepost: bo
 
 
 def render_recent_ready_assets_section(symbols: List[str], interval: str, include_prepost: bool, history_mode: str) -> pd.DataFrame:
-    lookback_days = READINESS_LOOKBACK_HOURS // 24
+    lookback_lbl = _readiness_lookback_label()
     resolved = _resolve_recent_ready_assets(symbols, interval=interval, include_prepost=include_prepost, history_mode=history_mode)
     ready_assets = resolved["ready_assets"]
-    st.subheader(f"Assets with ready signals in last {lookback_days} days")
+    st.subheader(f"Assets with ready signals in last {lookback_lbl}")
     st.caption(
         f"This helps you find which scanned symbols had at least one `READY` event recently, "
         f"even if they are not ready right now. The list currently uses `{history_mode}` history rules."
@@ -642,10 +647,12 @@ def render_recent_ready_assets_section(symbols: List[str], interval: str, includ
         )
 
     if interval == "1m":
-        st.caption("Note: `1m` history is usually limited by the data provider, so the full one-month window may not be available at that interval.")
+        st.caption(
+            f"Note: `1m` history is usually limited by the data provider, so the full last-{lookback_lbl} window may not be available at that interval."
+        )
 
     if ready_assets.empty:
-        st.info(f"No scanned symbols showed a recorded `READY` event in the last {lookback_days} days at the current interval.")
+        st.info(f"No scanned symbols showed a recorded `READY` event in the last {lookback_lbl} at the current interval.")
         return ready_assets
 
     display = ready_assets.copy()
